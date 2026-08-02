@@ -1,0 +1,1464 @@
+use rav1e::prelude::{
+    ChromaSampling, ColorDescription, ColorPrimaries, Config, EncoderConfig as Rav1eEncoderConfig,
+    EncoderStatus, MatrixCoefficients, PixelRange, Rational, TransferCharacteristics, Tune,
+};
+
+use crate::compat::{DataMap, EncodeOptions, EncoderOptions, Metadata, PickOptions};
+use crate::container::write_avif;
+use crate::error::EncoderError;
+use crate::lossless_backend::encode_still_lossless;
+use crate::lossless_types::LosslessPlanes;
+use crate::{FrameBuffers, ImageBuffer, PixelInformation, PlaneBuffer, Rgba16ImageBuffer};
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Sampling {
+    Cs400,
+    Cs420,
+    Cs422,
+    Cs444,
+}
+
+struct PlaneInput<'a> {
+    samples: &'a [u16],
+    width: usize,
+    height: usize,
+}
+
+pub(crate) struct EncodedFrame {
+    pub sequence_header: Vec<u8>,
+    pub frame_payload: Vec<u8>,
+    pub pixel_channels: u8,
+}
+
+/// Encodes one image supplied by a `PickCallback`.
+pub fn encode(option: &mut EncodeOptions<'_>) -> Result<Vec<u8>, EncoderError> {
+    let profile = option.drawer.encode_start()?;
+    let result = (|| {
+        let callback_metadata = option.drawer.metadata()?;
+        if profile.width == 0 || profile.height == 0 {
+            return Err(EncoderError::InvalidParam(
+                "image dimensions must be non-zero".to_string(),
+            ));
+        }
+        let data =
+            option
+                .drawer
+                .encode_pick(0, 0, profile.width, profile.height, Some(PickOptions {}))?;
+        let mut metadata = callback_metadata.unwrap_or_default();
+        if let Some(profile_metadata) = profile.metadata.as_ref() {
+            metadata.extend(profile_metadata.clone());
+        }
+        if let Some(option_metadata) = option.options.as_ref() {
+            metadata.extend(option_metadata.clone());
+        }
+        encode_bytes(
+            &ImageBuffer {
+                width: profile.width,
+                height: profile.height,
+                rgba: data,
+            },
+            &options_from_metadata((!metadata.is_empty()).then_some(&metadata))?,
+        )
+    })();
+    let end_result = option.drawer.encode_end();
+    match (result, end_result) {
+        (Ok(data), Ok(())) => Ok(data),
+        (Err(error), _) => Err(error),
+        (Ok(_), Err(error)) => Err(error),
+    }
+}
+
+/// Encodes an RGBA8 image into an AVIF still image.
+pub fn encode_bytes(
+    image: &ImageBuffer,
+    options: &EncoderOptions,
+) -> Result<Vec<u8>, EncoderError> {
+    validate_rgba8(image)?;
+    validate_options(options)?;
+    validate_pixel_information(options, 3, Some(8))?;
+    if color_lossless_requested(options) || alpha_lossless_requested(options) {
+        return encode_rgba8_with_lossless_items(
+            image,
+            options,
+            color_lossless_requested(options),
+            alpha_lossless_requested(options),
+        );
+    }
+    let (y, u, v, alpha) = rgba_to_yuv420(image);
+    let planes = [
+        PlaneInput {
+            samples: &y,
+            width: image.width,
+            height: image.height,
+        },
+        PlaneInput {
+            samples: &u,
+            width: chroma_width(image.width),
+            height: chroma_height(image.height),
+        },
+        PlaneInput {
+            samples: &v,
+            width: chroma_width(image.width),
+            height: chroma_height(image.height),
+        },
+    ];
+    let primary = encode_planes(
+        image.width,
+        image.height,
+        &planes,
+        Sampling::Cs420,
+        8,
+        options,
+    )?;
+    let mut alpha_options = options.clone();
+    alpha_options.quality = options.quality_alpha;
+    alpha_options.color_information = None;
+    let alpha = alpha.map(|samples| {
+        let alpha_plane = [PlaneInput {
+            samples: &samples,
+            width: image.width,
+            height: image.height,
+        }];
+        encode_planes(
+            image.width,
+            image.height,
+            &alpha_plane,
+            Sampling::Cs400,
+            8,
+            &alpha_options,
+        )
+    });
+    let alpha = match alpha {
+        Some(result) => Some(result?),
+        None => None,
+    };
+    let effective = effective_options(options, 3, 8);
+    write_avif(
+        image.width,
+        image.height,
+        &primary,
+        alpha.as_ref(),
+        &effective,
+    )
+}
+
+/// Encodes native YUV planes into an AVIF still image.
+pub fn encode_frame_bytes(
+    buffers: &FrameBuffers,
+    options: &EncoderOptions,
+) -> Result<Vec<u8>, EncoderError> {
+    validate_dimensions(buffers.width, buffers.height)?;
+    validate_options(options)?;
+    let sampling = sampling_from_planes(buffers)?;
+    validate_pixel_information(options, buffers.planes.len(), None)?;
+    let bit_depth = native_bit_depth(buffers, options)?;
+    let planes = buffers
+        .planes
+        .iter()
+        .map(plane_input)
+        .collect::<Result<Vec<_>, _>>()?;
+    if color_lossless_requested(options) {
+        return encode_lossless_native_full(buffers, options, sampling, bit_depth, &planes);
+    }
+    let primary = encode_planes(
+        buffers.width,
+        buffers.height,
+        &planes,
+        sampling,
+        bit_depth,
+        options,
+    )?;
+    let effective = effective_options(options, buffers.planes.len(), bit_depth);
+    write_avif(buffers.width, buffers.height, &primary, None, &effective)
+}
+
+/// Encodes an RGBA16 image as a native 12-bit 4:2:0 image by default.
+pub fn encode_rgba16_bytes(
+    image: &Rgba16ImageBuffer,
+    options: &EncoderOptions,
+) -> Result<Vec<u8>, EncoderError> {
+    validate_rgba16(image)?;
+    validate_options(options)?;
+    let bit_depth = options
+        .pixel_information
+        .as_ref()
+        .and_then(|value| value.bits_per_channel.first().copied())
+        .unwrap_or(12);
+    if !matches!(bit_depth, 8 | 10 | 12) {
+        return Err(EncoderError::InvalidParam(
+            "RGBA16 encoding supports 8, 10, or 12 bits".to_string(),
+        ));
+    }
+    validate_pixel_information(options, 3, Some(bit_depth))?;
+    if color_lossless_requested(options) || alpha_lossless_requested(options) {
+        return encode_rgba16_with_lossless_items(
+            image,
+            options,
+            bit_depth,
+            color_lossless_requested(options),
+            alpha_lossless_requested(options),
+        );
+    }
+    let (y, u, v, alpha) = rgba16_to_yuv420(image, bit_depth);
+    let planes = [
+        PlaneInput {
+            samples: &y,
+            width: image.width,
+            height: image.height,
+        },
+        PlaneInput {
+            samples: &u,
+            width: chroma_width(image.width),
+            height: chroma_height(image.height),
+        },
+        PlaneInput {
+            samples: &v,
+            width: chroma_width(image.width),
+            height: chroma_height(image.height),
+        },
+    ];
+    let primary = encode_planes(
+        image.width,
+        image.height,
+        &planes,
+        Sampling::Cs420,
+        bit_depth,
+        options,
+    )?;
+    let mut alpha_options = options.clone();
+    alpha_options.quality = options.quality_alpha;
+    alpha_options.color_information = None;
+    let alpha = alpha.map(|samples| {
+        let alpha_plane = [PlaneInput {
+            samples: &samples,
+            width: image.width,
+            height: image.height,
+        }];
+        encode_planes(
+            image.width,
+            image.height,
+            &alpha_plane,
+            Sampling::Cs400,
+            bit_depth,
+            &alpha_options,
+        )
+    });
+    let alpha = match alpha {
+        Some(result) => Some(result?),
+        None => None,
+    };
+    let effective = effective_options(options, 3, bit_depth);
+    write_avif(
+        image.width,
+        image.height,
+        &primary,
+        alpha.as_ref(),
+        &effective,
+    )
+}
+
+fn encode_planes(
+    width: usize,
+    height: usize,
+    planes: &[PlaneInput<'_>],
+    sampling: Sampling,
+    bit_depth: u8,
+    options: &EncoderOptions,
+) -> Result<EncodedFrame, EncoderError> {
+    let chroma_sampling = match sampling {
+        Sampling::Cs400 => ChromaSampling::Cs400,
+        Sampling::Cs420 => ChromaSampling::Cs420,
+        Sampling::Cs422 => ChromaSampling::Cs422,
+        Sampling::Cs444 => ChromaSampling::Cs444,
+    };
+    if planes.len() != if sampling == Sampling::Cs400 { 1 } else { 3 } {
+        return Err(EncoderError::InvalidParam(
+            "plane count does not match chroma sampling".to_string(),
+        ));
+    }
+    for (index, plane) in planes.iter().enumerate() {
+        let expected = if index == 0 {
+            (width, height)
+        } else {
+            chroma_dimensions(width, height, sampling)
+        };
+        if (plane.width, plane.height) != expected {
+            return Err(EncoderError::InvalidParam(format!(
+                "plane {index} has {}x{}, expected {}x{}",
+                plane.width, plane.height, expected.0, expected.1
+            )));
+        }
+        let expected_samples = plane
+            .width
+            .checked_mul(plane.height)
+            .ok_or_else(|| EncoderError::InvalidParam("plane size overflows usize".to_string()))?;
+        if plane.samples.len() != expected_samples {
+            return Err(EncoderError::InvalidParam(format!(
+                "plane {index} has {} samples, expected {expected_samples}",
+                plane.samples.len()
+            )));
+        }
+        let max_sample = (1u32 << u32::from(bit_depth)) - 1;
+        if plane
+            .samples
+            .iter()
+            .any(|&sample| u32::from(sample) > max_sample)
+        {
+            return Err(EncoderError::InvalidParam(format!(
+                "plane {index} contains a sample outside the {bit_depth}-bit range"
+            )));
+        }
+    }
+
+    let mut config = Rav1eEncoderConfig::with_speed_preset(options.speed);
+    config.width = width;
+    config.height = height;
+    config.bit_depth = usize::from(bit_depth);
+    config.chroma_sampling = chroma_sampling;
+    config.pixel_range = pixel_range(options);
+    config.color_description = color_description(options);
+    config.time_base = Rational::new(1, 1);
+    config.still_picture = true;
+    config.quantizer = quality_to_quantizer(options.quality);
+    config.min_quantizer = config.quantizer as u8;
+    config.set_key_frame_interval(1, 1);
+    config.tile_cols = 1usize << options.tile_cols_log2;
+    config.tile_rows = 1usize << options.tile_rows_log2;
+    apply_advanced(&mut config, &options.advanced)?;
+
+    let config = Config::new()
+        .with_encoder_config(config)
+        .with_threads(options.jobs);
+    let mut context = config
+        .new_context::<u16>()
+        .map_err(|error| EncoderError::InvalidParam(error.to_string()))?;
+    let mut frame = context.new_frame();
+    for (index, plane) in planes.iter().enumerate() {
+        let bytes = plane
+            .samples
+            .iter()
+            .flat_map(|sample| sample.to_le_bytes())
+            .collect::<Vec<_>>();
+        frame.planes[index].copy_from_raw_u8(&bytes, plane.width * 2, 2);
+        // rav1e's plane padding takes the visible luma dimensions and applies
+        // the plane's subsampling internally. Passing the already-subsampled
+        // chroma dimensions leaves the right/bottom edge under-padded for odd
+        // image sizes.
+        frame.planes[index].pad(width, height);
+    }
+    context
+        .send_frame(frame)
+        .map_err(|error| EncoderError::Bitstream(error.to_string()))?;
+    context.flush();
+
+    let mut packet = None;
+    loop {
+        match context.receive_packet() {
+            Ok(value) => packet = Some(value.data),
+            Err(EncoderStatus::Encoded) => continue,
+            Err(EncoderStatus::LimitReached) => break,
+            Err(error) => return Err(EncoderError::Bitstream(error.to_string())),
+        }
+    }
+    let frame_payload = packet.ok_or_else(|| {
+        EncoderError::NotEnoughData("rav1e produced no AV1 frame packet".to_string())
+    })?;
+    Ok(EncodedFrame {
+        sequence_header: context.container_sequence_header().to_vec(),
+        frame_payload,
+        pixel_channels: planes.len() as u8,
+    })
+}
+
+fn validate_rgba8(image: &ImageBuffer) -> Result<(), EncoderError> {
+    validate_dimensions(image.width, image.height)?;
+    let expected = image
+        .width
+        .checked_mul(image.height)
+        .and_then(|pixels| pixels.checked_mul(4))
+        .ok_or_else(|| {
+            EncoderError::InvalidParam("RGBA buffer size overflows usize".to_string())
+        })?;
+    if image.rgba.len() != expected {
+        return Err(EncoderError::InvalidParam(format!(
+            "RGBA buffer has {} bytes, expected {expected}",
+            image.rgba.len()
+        )));
+    }
+    Ok(())
+}
+
+fn validate_rgba16(image: &Rgba16ImageBuffer) -> Result<(), EncoderError> {
+    validate_dimensions(image.width, image.height)?;
+    let expected = image
+        .width
+        .checked_mul(image.height)
+        .and_then(|pixels| pixels.checked_mul(4))
+        .ok_or_else(|| {
+            EncoderError::InvalidParam("RGBA16 buffer size overflows usize".to_string())
+        })?;
+    if image.rgba.len() != expected {
+        return Err(EncoderError::InvalidParam(format!(
+            "RGBA16 buffer has {} samples, expected {expected}",
+            image.rgba.len()
+        )));
+    }
+    Ok(())
+}
+
+fn validate_dimensions(width: usize, height: usize) -> Result<(), EncoderError> {
+    if width == 0 || height == 0 {
+        return Err(EncoderError::InvalidParam(
+            "image dimensions must be non-zero".to_string(),
+        ));
+    }
+    Ok(())
+}
+
+fn validate_options(options: &EncoderOptions) -> Result<(), EncoderError> {
+    if options.quality > 100 || options.quality_alpha > 100 {
+        return Err(EncoderError::InvalidParam(
+            "quality and quality_alpha must be in 0..=100".to_string(),
+        ));
+    }
+    if options.speed > 10 {
+        return Err(EncoderError::InvalidParam(
+            "speed must be in 0..=10".to_string(),
+        ));
+    }
+    if options.tile_rows_log2 > 6 || options.tile_cols_log2 > 6 {
+        return Err(EncoderError::InvalidParam(
+            "tile log2 values must be in 0..=6".to_string(),
+        ));
+    }
+    if let Some(pixi) = &options.pixel_information {
+        if pixi.bits_per_channel.is_empty() || pixi.bits_per_channel.len() > 255 {
+            return Err(EncoderError::InvalidParam(
+                "pixi must contain between one and 255 channels".to_string(),
+            ));
+        }
+        if pixi
+            .bits_per_channel
+            .iter()
+            .any(|bits| !matches!(bits, 8 | 10 | 12))
+        {
+            return Err(EncoderError::Unsupported(
+                "only 8, 10, and 12-bit AVIF input is supported".to_string(),
+            ));
+        }
+        if pixi
+            .bits_per_channel
+            .windows(2)
+            .any(|bits| bits[0] != bits[1])
+        {
+            return Err(EncoderError::InvalidParam(
+                "all AVIF channels must use the same bit depth".to_string(),
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn color_lossless_requested(options: &EncoderOptions) -> bool {
+    options.lossless || options.quality == 100
+}
+
+fn alpha_lossless_requested(options: &EncoderOptions) -> bool {
+    options.lossless || options.quality_alpha == 100
+}
+
+fn validate_lossless_options(
+    options: &EncoderOptions,
+    channels: usize,
+    bit_depth: u8,
+    input_kind: &str,
+) -> Result<(), EncoderError> {
+    if options.speed != EncoderOptions::default().speed
+        || options.jobs != 0
+        || options.tile_rows_log2 != 0
+        || options.tile_cols_log2 != 0
+        || !options.advanced.is_empty()
+    {
+        return Err(EncoderError::Unsupported(format!(
+            "the lossless {input_kind} backend does not expose speed, jobs, tiling, or advanced controls"
+        )));
+    }
+    if let Some(pixi) = &options.pixel_information
+        && (pixi.bits_per_channel.len() != channels
+            || pixi.bits_per_channel.iter().any(|&bits| bits != bit_depth)
+            || pixi.extended_channels.is_some())
+    {
+        return Err(EncoderError::Unsupported(format!(
+            "the lossless {input_kind} backend emits {channels} {bit_depth}-bit channels without extended channels"
+        )));
+    }
+    if let Some(color) = &options.color_information {
+        if color.icc_profile().is_some() {
+            return Err(EncoderError::Unsupported(format!(
+                "the lossless {input_kind} backend does not preserve ICC profiles"
+            )));
+        }
+        if let Some(nclx) = color.nclx()
+            && !matches!(
+                (
+                    nclx.color_primaries,
+                    nclx.transfer_characteristics,
+                    nclx.matrix_coefficients,
+                    nclx.full_range_flag,
+                ),
+                (1, 13, 0, true) | (1, 13, 6, true)
+            )
+        {
+            return Err(EncoderError::Unsupported(format!(
+                "the lossless {input_kind} backend requires full-range BT.709/sRGB CICP metadata"
+            )));
+        }
+    }
+    Ok(())
+}
+
+fn encode_rgba8_with_lossless_items(
+    image: &ImageBuffer,
+    options: &EncoderOptions,
+    color_lossless: bool,
+    alpha_lossless: bool,
+) -> Result<Vec<u8>, EncoderError> {
+    let has_alpha = image.rgba.chunks_exact(4).any(|pixel| pixel[3] != u8::MAX);
+    if color_lossless {
+        validate_lossless_options(options, 3, 8, "RGBA8 color")?;
+    }
+
+    let width = u32::try_from(image.width)
+        .map_err(|_| EncoderError::InvalidParam("image width exceeds u32".to_string()))?;
+    let height = u32::try_from(image.height)
+        .map_err(|_| EncoderError::InvalidParam("image height exceeds u32".to_string()))?;
+    let primary = if color_lossless {
+        let rgb = image
+            .rgba
+            .chunks_exact(4)
+            .flat_map(|pixel| pixel[..3].iter().copied())
+            .collect::<Vec<_>>();
+        encode_gamut_lossless_frame(width, height, &rgb)?
+    } else {
+        let (y, u, v, _) = rgba_to_yuv420(image);
+        let planes = [
+            PlaneInput {
+                samples: &y,
+                width: image.width,
+                height: image.height,
+            },
+            PlaneInput {
+                samples: &u,
+                width: chroma_width(image.width),
+                height: chroma_height(image.height),
+            },
+            PlaneInput {
+                samples: &v,
+                width: chroma_width(image.width),
+                height: chroma_height(image.height),
+            },
+        ];
+        encode_planes(
+            image.width,
+            image.height,
+            &planes,
+            Sampling::Cs420,
+            8,
+            options,
+        )?
+    };
+    let alpha = if has_alpha {
+        let alpha_samples = image
+            .rgba
+            .chunks_exact(4)
+            .map(|pixel| u16::from(pixel[3]))
+            .collect::<Vec<_>>();
+        if alpha_lossless {
+            let alpha_options = {
+                let mut value = options.clone();
+                value.quality = options.quality_alpha;
+                value.quality_alpha = options.quality_alpha;
+                value.color_information = None;
+                value.pixel_information = Some(PixelInformation {
+                    bits_per_channel: vec![8],
+                    extended_channels: None,
+                });
+                value
+            };
+            validate_lossless_options(&alpha_options, 1, 8, "RGBA8 alpha")?;
+            Some(encode_lossless_gray_samples(
+                width,
+                height,
+                &alpha_samples,
+                8,
+            )?)
+        } else {
+            let alpha_options = {
+                let mut value = options.clone();
+                value.quality = options.quality_alpha;
+                value.color_information = None;
+                value
+            };
+            let alpha_plane = [PlaneInput {
+                samples: &alpha_samples,
+                width: image.width,
+                height: image.height,
+            }];
+            Some(encode_planes(
+                image.width,
+                image.height,
+                &alpha_plane,
+                Sampling::Cs400,
+                8,
+                &alpha_options,
+            )?)
+        }
+    } else {
+        None
+    };
+    let mut effective = effective_options(options, 3, 8);
+    if color_lossless {
+        effective.color_information = Some(lossless_color_information());
+    }
+    write_avif(
+        width as usize,
+        height as usize,
+        &primary,
+        alpha.as_ref(),
+        &effective,
+    )
+}
+
+fn encode_rgba16_with_lossless_items(
+    image: &Rgba16ImageBuffer,
+    options: &EncoderOptions,
+    bit_depth: u8,
+    color_lossless: bool,
+    alpha_lossless: bool,
+) -> Result<Vec<u8>, EncoderError> {
+    let max = ((1u32 << u32::from(bit_depth)) - 1) as u16;
+    let mut rgb = Vec::with_capacity(image.rgba.len().saturating_sub(image.rgba.len() / 4));
+    let mut alpha_samples = Vec::with_capacity(image.rgba.len() / 4);
+    let mut has_alpha = false;
+    for pixel in image.rgba.chunks_exact(4) {
+        let red = scale_u16(pixel[0], u32::from(max)) as u16;
+        let green = scale_u16(pixel[1], u32::from(max)) as u16;
+        let blue = scale_u16(pixel[2], u32::from(max)) as u16;
+        let alpha = scale_u16(pixel[3], u32::from(max)) as u16;
+        rgb.extend_from_slice(&[red, green, blue]);
+        alpha_samples.push(alpha);
+        has_alpha |= alpha != max;
+    }
+
+    if color_lossless {
+        validate_lossless_options(options, 3, bit_depth, "RGBA16 color")?;
+    }
+    let width = u32::try_from(image.width)
+        .map_err(|_| EncoderError::InvalidParam("image width exceeds u32".to_string()))?;
+    let height = u32::try_from(image.height)
+        .map_err(|_| EncoderError::InvalidParam("image height exceeds u32".to_string()))?;
+    let primary = if color_lossless {
+        encode_gamut_lossless_samples(width, height, &rgb, bit_depth)?
+    } else {
+        let (y, u, v, _) = rgba16_to_yuv420(image, bit_depth);
+        let planes = [
+            PlaneInput {
+                samples: &y,
+                width: image.width,
+                height: image.height,
+            },
+            PlaneInput {
+                samples: &u,
+                width: chroma_width(image.width),
+                height: chroma_height(image.height),
+            },
+            PlaneInput {
+                samples: &v,
+                width: chroma_width(image.width),
+                height: chroma_height(image.height),
+            },
+        ];
+        encode_planes(
+            image.width,
+            image.height,
+            &planes,
+            Sampling::Cs420,
+            bit_depth,
+            options,
+        )?
+    };
+    let alpha = if has_alpha {
+        if alpha_lossless {
+            let alpha_options = {
+                let mut value = options.clone();
+                value.quality = options.quality_alpha;
+                value.quality_alpha = options.quality_alpha;
+                value.color_information = None;
+                value.pixel_information = Some(PixelInformation {
+                    bits_per_channel: vec![bit_depth],
+                    extended_channels: None,
+                });
+                value
+            };
+            validate_lossless_options(&alpha_options, 1, bit_depth, "RGBA16 alpha")?;
+            Some(encode_lossless_gray_samples(
+                width,
+                height,
+                &alpha_samples,
+                bit_depth,
+            )?)
+        } else {
+            let alpha_options = {
+                let mut value = options.clone();
+                value.quality = options.quality_alpha;
+                value.color_information = None;
+                value
+            };
+            let alpha_plane = [PlaneInput {
+                samples: &alpha_samples,
+                width: image.width,
+                height: image.height,
+            }];
+            Some(encode_planes(
+                image.width,
+                image.height,
+                &alpha_plane,
+                Sampling::Cs400,
+                bit_depth,
+                &alpha_options,
+            )?)
+        }
+    } else {
+        None
+    };
+    let mut effective = effective_options(options, 3, bit_depth);
+    if color_lossless {
+        effective.color_information = Some(lossless_color_information());
+    }
+    write_avif(
+        image.width,
+        image.height,
+        &primary,
+        alpha.as_ref(),
+        &effective,
+    )
+}
+
+fn lossless_color_information() -> crate::ColorInformation {
+    crate::NclxColorInformation {
+        color_primaries: 1,
+        transfer_characteristics: 13,
+        matrix_coefficients: 0,
+        full_range_flag: true,
+    }
+    .to_color_information()
+}
+
+fn encode_lossless_native_full(
+    buffers: &FrameBuffers,
+    options: &EncoderOptions,
+    sampling: Sampling,
+    bit_depth: u8,
+    planes: &[PlaneInput<'_>],
+) -> Result<Vec<u8>, EncoderError> {
+    let channels = if sampling == Sampling::Cs400 { 1 } else { 3 };
+    validate_lossless_options(options, channels, bit_depth, "native lossless")?;
+    if planes.len() != channels {
+        return Err(EncoderError::InvalidParam(
+            "lossless native plane count does not match chroma sampling".to_string(),
+        ));
+    }
+    let (subsampling_x, subsampling_y) = match sampling {
+        Sampling::Cs400 | Sampling::Cs444 => (0, 0),
+        Sampling::Cs420 => (1, 1),
+        Sampling::Cs422 => (1, 0),
+    };
+    let color = options
+        .color_information
+        .as_ref()
+        .and_then(crate::ColorInformation::nclx)
+        .unwrap_or(crate::NclxColorInformation {
+            color_primaries: 1,
+            transfer_characteristics: 13,
+            matrix_coefficients: 6,
+            full_range_flag: true,
+        });
+    if matches!(sampling, Sampling::Cs420 | Sampling::Cs422) && color.matrix_coefficients == 0 {
+        return Err(EncoderError::Unsupported(
+            "lossless native 4:2:0 and 4:2:2 require non-identity CICP matrix coefficients"
+                .to_string(),
+        ));
+    }
+    for (index, plane) in planes.iter().enumerate() {
+        let expected = if index == 0 {
+            (buffers.width, buffers.height)
+        } else {
+            chroma_dimensions(buffers.width, buffers.height, sampling)
+        };
+        let expected_samples = expected
+            .0
+            .checked_mul(expected.1)
+            .ok_or_else(|| EncoderError::InvalidParam("plane size overflows usize".to_string()))?;
+        if (plane.width, plane.height) != expected
+            || plane.samples.len() != expected_samples
+            || plane
+                .samples
+                .iter()
+                .any(|&sample| sample >= (1u16 << bit_depth))
+        {
+            return Err(EncoderError::InvalidParam(format!(
+                "lossless native plane {index} must be a {}x{} {bit_depth}-bit plane",
+                expected.0, expected.1
+            )));
+        }
+    }
+
+    let lossless_planes = LosslessPlanes {
+        width: u32::try_from(buffers.width)
+            .map_err(|_| EncoderError::InvalidParam("image width exceeds u32".to_string()))?,
+        height: u32::try_from(buffers.height)
+            .map_err(|_| EncoderError::InvalidParam("image height exceeds u32".to_string()))?,
+        bit_depth,
+        monochrome: sampling == Sampling::Cs400,
+        subsampling_x,
+        subsampling_y,
+        color_primaries: color.color_primaries,
+        transfer_characteristics: color.transfer_characteristics,
+        matrix_coefficients: if matches!(sampling, Sampling::Cs400 | Sampling::Cs444) {
+            0
+        } else {
+            color.matrix_coefficients
+        },
+        full_range: color.full_range_flag,
+        planes: planes.iter().map(|plane| plane.samples).collect(),
+    };
+    let primary = encode_lossless_plane_set(&lossless_planes)?;
+    let mut effective = effective_options(options, channels, bit_depth);
+    if matches!(sampling, Sampling::Cs400 | Sampling::Cs444) {
+        effective.color_information = Some(lossless_color_information());
+    }
+    write_avif(buffers.width, buffers.height, &primary, None, &effective)
+}
+
+fn encode_gamut_lossless_frame(
+    width: u32,
+    height: u32,
+    rgb: &[u8],
+) -> Result<EncodedFrame, EncoderError> {
+    let rgb = rgb.iter().copied().map(u16::from).collect::<Vec<_>>();
+    encode_gamut_lossless_samples(width, height, &rgb, 8)
+}
+
+fn encode_gamut_lossless_samples(
+    width: u32,
+    height: u32,
+    rgb: &[u16],
+    bit_depth: u8,
+) -> Result<EncodedFrame, EncoderError> {
+    let sample_count = usize::try_from(width)
+        .ok()
+        .and_then(|width| {
+            usize::try_from(height)
+                .ok()
+                .and_then(|height| width.checked_mul(height))
+        })
+        .ok_or_else(|| {
+            EncoderError::InvalidParam("lossless image dimensions overflow usize".to_string())
+        })?;
+    let expected_len = sample_count.checked_mul(3).ok_or_else(|| {
+        EncoderError::InvalidParam("lossless RGB buffer size overflows usize".to_string())
+    })?;
+    if rgb.len() != expected_len {
+        return Err(EncoderError::InvalidParam(
+            "lossless RGB buffer length does not match image dimensions".to_string(),
+        ));
+    }
+    if !matches!(bit_depth, 8 | 10 | 12) {
+        return Err(EncoderError::InvalidParam(
+            "lossless RGB samples do not match the selected bit depth".to_string(),
+        ));
+    }
+    let max_sample = 1u16 << bit_depth;
+    if rgb.iter().any(|&sample| sample >= max_sample) {
+        return Err(EncoderError::InvalidParam(
+            "lossless RGB samples do not match the selected bit depth".to_string(),
+        ));
+    }
+    let mut g = Vec::with_capacity(sample_count);
+    let mut b = Vec::with_capacity(sample_count);
+    let mut r = Vec::with_capacity(sample_count);
+    for pixel in rgb.chunks_exact(3) {
+        r.push(pixel[0]);
+        g.push(pixel[1]);
+        b.push(pixel[2]);
+    }
+    let planes = LosslessPlanes {
+        width,
+        height,
+        bit_depth,
+        monochrome: false,
+        subsampling_x: 0,
+        subsampling_y: 0,
+        color_primaries: 1,
+        transfer_characteristics: 13,
+        matrix_coefficients: 0,
+        full_range: true,
+        planes: vec![&g, &b, &r],
+    };
+    encode_lossless_plane_set(&planes)
+}
+
+fn encode_lossless_gray_samples(
+    width: u32,
+    height: u32,
+    samples: &[u16],
+    bit_depth: u8,
+) -> Result<EncodedFrame, EncoderError> {
+    let expected = usize::try_from(width)
+        .ok()
+        .and_then(|width| {
+            usize::try_from(height)
+                .ok()
+                .and_then(|height| width.checked_mul(height))
+        })
+        .ok_or_else(|| {
+            EncoderError::InvalidParam("lossless image dimensions overflow usize".to_string())
+        })?;
+    if samples.len() != expected || !matches!(bit_depth, 8 | 10 | 12) {
+        return Err(EncoderError::InvalidParam(
+            "lossless gray samples do not match the selected bit depth".to_string(),
+        ));
+    }
+    let max_sample = 1u16 << bit_depth;
+    if samples.iter().any(|&sample| sample >= max_sample) {
+        return Err(EncoderError::InvalidParam(
+            "lossless gray samples do not match the selected bit depth".to_string(),
+        ));
+    }
+    let planes = LosslessPlanes {
+        width,
+        height,
+        bit_depth,
+        monochrome: true,
+        subsampling_x: 0,
+        subsampling_y: 0,
+        color_primaries: 1,
+        transfer_characteristics: 13,
+        matrix_coefficients: 0,
+        full_range: true,
+        planes: vec![samples],
+    };
+    encode_lossless_plane_set(&planes)
+}
+
+fn encode_lossless_plane_set(planes: &LosslessPlanes<'_>) -> Result<EncodedFrame, EncoderError> {
+    let still = encode_still_lossless(planes)
+        .map_err(|error| EncoderError::Bitstream(error.to_string()))?;
+    Ok(EncodedFrame {
+        sequence_header: vec![
+            0x81,
+            (still.config.seq_profile << 5) | (still.config.seq_level_idx_0 & 0x1f),
+            (still.config.seq_tier_0 << 7)
+                | (u8::from(still.config.high_bitdepth) << 6)
+                | (u8::from(still.config.twelve_bit) << 5)
+                | (u8::from(still.config.monochrome) << 4)
+                | (still.config.chroma_subsampling_x << 3)
+                | (still.config.chroma_subsampling_y << 2)
+                | (still.config.chroma_sample_position & 0x3),
+            0,
+        ],
+        frame_payload: still.obus,
+        pixel_channels: if still.config.monochrome { 1 } else { 3 },
+    })
+}
+
+fn validate_pixel_information(
+    options: &EncoderOptions,
+    channels: usize,
+    expected_bit_depth: Option<u8>,
+) -> Result<(), EncoderError> {
+    if let Some(pixi) = &options.pixel_information {
+        if pixi.bits_per_channel.len() != channels {
+            return Err(EncoderError::InvalidParam(format!(
+                "pixi contains {} channels, but the encoded image has {channels}",
+                pixi.bits_per_channel.len()
+            )));
+        }
+        if let Some(expected_bit_depth) = expected_bit_depth
+            && pixi.bits_per_channel[0] != expected_bit_depth
+        {
+            return Err(EncoderError::InvalidParam(format!(
+                "pixi declares {}-bit channels, but the encoded image uses {expected_bit_depth}-bit samples",
+                pixi.bits_per_channel[0]
+            )));
+        }
+    }
+    Ok(())
+}
+
+fn effective_options(options: &EncoderOptions, channels: usize, bit_depth: u8) -> EncoderOptions {
+    let mut effective = options.clone();
+    if effective.pixel_information.is_none() {
+        effective.pixel_information = Some(crate::PixelInformation {
+            bits_per_channel: vec![bit_depth; channels],
+            extended_channels: None,
+        });
+    }
+    effective
+}
+
+fn quality_to_quantizer(quality: u8) -> usize {
+    (((100u16.saturating_sub(quality as u16) * 63) / 100) as usize).max(1)
+}
+
+fn pixel_range(options: &EncoderOptions) -> PixelRange {
+    options
+        .color_information
+        .as_ref()
+        .and_then(crate::ColorInformation::nclx)
+        .map_or(PixelRange::Full, |color| {
+            if color.full_range_flag {
+                PixelRange::Full
+            } else {
+                PixelRange::Limited
+            }
+        })
+}
+
+fn color_description(options: &EncoderOptions) -> Option<ColorDescription> {
+    let color = options.color_information.as_ref()?.nclx()?;
+    Some(ColorDescription {
+        color_primaries: color_primaries(color.color_primaries),
+        transfer_characteristics: transfer_characteristics(color.transfer_characteristics),
+        matrix_coefficients: matrix_coefficients(color.matrix_coefficients),
+    })
+}
+
+fn color_primaries(value: u16) -> ColorPrimaries {
+    match value {
+        1 => ColorPrimaries::BT709,
+        4 => ColorPrimaries::BT470M,
+        5 => ColorPrimaries::BT470BG,
+        6 => ColorPrimaries::BT601,
+        7 => ColorPrimaries::SMPTE240,
+        8 => ColorPrimaries::GenericFilm,
+        9 => ColorPrimaries::BT2020,
+        10 => ColorPrimaries::XYZ,
+        11 => ColorPrimaries::SMPTE431,
+        12 => ColorPrimaries::SMPTE432,
+        22 => ColorPrimaries::EBU3213,
+        _ => ColorPrimaries::Unspecified,
+    }
+}
+
+fn transfer_characteristics(value: u16) -> TransferCharacteristics {
+    match value {
+        1 => TransferCharacteristics::BT709,
+        4 => TransferCharacteristics::BT470M,
+        5 => TransferCharacteristics::BT470BG,
+        6 => TransferCharacteristics::BT601,
+        7 => TransferCharacteristics::SMPTE240,
+        8 => TransferCharacteristics::Linear,
+        9 => TransferCharacteristics::Log100,
+        10 => TransferCharacteristics::Log100Sqrt10,
+        11 => TransferCharacteristics::IEC61966,
+        12 => TransferCharacteristics::BT1361,
+        13 => TransferCharacteristics::SRGB,
+        14 => TransferCharacteristics::BT2020_10Bit,
+        15 => TransferCharacteristics::BT2020_12Bit,
+        16 => TransferCharacteristics::SMPTE2084,
+        17 => TransferCharacteristics::SMPTE428,
+        18 => TransferCharacteristics::HLG,
+        _ => TransferCharacteristics::Unspecified,
+    }
+}
+
+fn matrix_coefficients(value: u16) -> MatrixCoefficients {
+    match value {
+        0 => MatrixCoefficients::Identity,
+        1 => MatrixCoefficients::BT709,
+        4 => MatrixCoefficients::FCC,
+        5 => MatrixCoefficients::BT470BG,
+        6 => MatrixCoefficients::BT601,
+        7 => MatrixCoefficients::SMPTE240,
+        8 => MatrixCoefficients::YCgCo,
+        9 => MatrixCoefficients::BT2020NCL,
+        10 => MatrixCoefficients::BT2020CL,
+        11 => MatrixCoefficients::SMPTE2085,
+        12 => MatrixCoefficients::ChromatNCL,
+        13 => MatrixCoefficients::ChromatCL,
+        14 => MatrixCoefficients::ICtCp,
+        _ => MatrixCoefficients::Unspecified,
+    }
+}
+
+fn rgba_to_yuv420(image: &ImageBuffer) -> (Vec<u16>, Vec<u16>, Vec<u16>, Option<Vec<u16>>) {
+    let chroma_width = chroma_width(image.width);
+    let chroma_height = chroma_height(image.height);
+    let mut y = vec![0u16; image.width * image.height];
+    let mut u_sum = vec![0u32; chroma_width * chroma_height];
+    let mut v_sum = vec![0u32; chroma_width * chroma_height];
+    let mut chroma_count = vec![0u32; chroma_width * chroma_height];
+    let mut alpha = vec![0u16; image.width * image.height];
+    let mut has_alpha = false;
+    for row in 0..image.height {
+        for column in 0..image.width {
+            let offset = (row * image.width + column) * 4;
+            let (yy, uu, vv) = rgb_to_yuv(
+                image.rgba[offset],
+                image.rgba[offset + 1],
+                image.rgba[offset + 2],
+            );
+            y[row * image.width + column] = u16::from(yy);
+            let chroma_index = (row / 2) * chroma_width + column / 2;
+            u_sum[chroma_index] += u32::from(uu);
+            v_sum[chroma_index] += u32::from(vv);
+            chroma_count[chroma_index] += 1;
+            let a = image.rgba[offset + 3];
+            alpha[row * image.width + column] = u16::from(a);
+            has_alpha |= a != u8::MAX;
+        }
+    }
+    let u = u_sum
+        .into_iter()
+        .zip(chroma_count.iter().copied())
+        .map(|(sum, count)| ((sum + count / 2) / count) as u16)
+        .collect();
+    let v = v_sum
+        .into_iter()
+        .zip(chroma_count.iter().copied())
+        .map(|(sum, count)| ((sum + count / 2) / count) as u16)
+        .collect();
+    (y, u, v, has_alpha.then_some(alpha))
+}
+
+fn rgba16_to_yuv420(
+    image: &Rgba16ImageBuffer,
+    bit_depth: u8,
+) -> (Vec<u16>, Vec<u16>, Vec<u16>, Option<Vec<u16>>) {
+    let max = (1u32 << u32::from(bit_depth)) - 1;
+    let chroma_width = chroma_width(image.width);
+    let chroma_height = chroma_height(image.height);
+    let mut y = vec![0u16; image.width * image.height];
+    let mut u_sum = vec![0u64; chroma_width * chroma_height];
+    let mut v_sum = vec![0u64; chroma_width * chroma_height];
+    let mut chroma_count = vec![0u64; chroma_width * chroma_height];
+    let mut alpha = vec![0u16; image.width * image.height];
+    let mut has_alpha = false;
+    for row in 0..image.height {
+        for column in 0..image.width {
+            let offset = (row * image.width + column) * 4;
+            let red = scale_u16(image.rgba[offset], max);
+            let green = scale_u16(image.rgba[offset + 1], max);
+            let blue = scale_u16(image.rgba[offset + 2], max);
+            let (yy, uu, vv) = rgb_to_yuv_u32(red, green, blue, max);
+            y[row * image.width + column] = yy as u16;
+            let chroma_index = (row / 2) * chroma_width + column / 2;
+            u_sum[chroma_index] += u64::from(uu);
+            v_sum[chroma_index] += u64::from(vv);
+            chroma_count[chroma_index] += 1;
+            let a = scale_u16(image.rgba[offset + 3], max);
+            alpha[row * image.width + column] = a as u16;
+            has_alpha |= a != max;
+        }
+    }
+    let u = u_sum
+        .into_iter()
+        .zip(chroma_count.iter().copied())
+        .map(|(sum, count)| ((sum + count / 2) / count) as u16)
+        .collect();
+    let v = v_sum
+        .into_iter()
+        .zip(chroma_count.iter().copied())
+        .map(|(sum, count)| ((sum + count / 2) / count) as u16)
+        .collect();
+    (y, u, v, has_alpha.then_some(alpha))
+}
+
+fn plane_input(plane: &PlaneBuffer) -> Result<PlaneInput<'_>, EncoderError> {
+    if plane.samples.len() != plane.layout.sample_count {
+        return Err(EncoderError::InvalidParam(format!(
+            "plane {} has {} samples, expected {}",
+            plane.layout.plane,
+            plane.samples.len(),
+            plane.layout.sample_count
+        )));
+    }
+    Ok(PlaneInput {
+        samples: &plane.samples,
+        width: plane.layout.width,
+        height: plane.layout.height,
+    })
+}
+
+fn sampling_from_planes(buffers: &FrameBuffers) -> Result<Sampling, EncoderError> {
+    match buffers.planes.len() {
+        1 => Ok(Sampling::Cs400),
+        3 => {
+            let u = &buffers.planes[1].layout;
+            let v = &buffers.planes[2].layout;
+            if u.subsampling_x != v.subsampling_x || u.subsampling_y != v.subsampling_y {
+                return Err(EncoderError::InvalidParam(
+                    "U and V plane subsampling must match".to_string(),
+                ));
+            }
+            match (u.subsampling_x, u.subsampling_y) {
+                (1, 1) => Ok(Sampling::Cs420),
+                (1, 0) => Ok(Sampling::Cs422),
+                (0, 0) => Ok(Sampling::Cs444),
+                _ => Err(EncoderError::Unsupported(
+                    "unsupported native plane subsampling".to_string(),
+                )),
+            }
+        }
+        _ => Err(EncoderError::InvalidParam(
+            "native AVIF input requires one or three planes".to_string(),
+        )),
+    }
+}
+
+fn native_bit_depth(buffers: &FrameBuffers, options: &EncoderOptions) -> Result<u8, EncoderError> {
+    if let Some(bits) = options
+        .pixel_information
+        .as_ref()
+        .and_then(|value| value.bits_per_channel.first().copied())
+    {
+        if matches!(bits, 8 | 10 | 12) {
+            return Ok(bits);
+        }
+        return Err(EncoderError::Unsupported(
+            "only 8, 10, and 12-bit AVIF input is supported".to_string(),
+        ));
+    }
+    let max_sample = buffers
+        .planes
+        .iter()
+        .flat_map(|plane| plane.samples.iter().copied())
+        .max()
+        .unwrap_or(0);
+    Ok(if max_sample <= 255 {
+        8
+    } else if max_sample <= 1023 {
+        10
+    } else if max_sample <= 4095 {
+        12
+    } else {
+        return Err(EncoderError::InvalidParam(
+            "native samples exceed the supported 12-bit range".to_string(),
+        ));
+    })
+}
+
+fn options_from_metadata(metadata: Option<&Metadata>) -> Result<EncoderOptions, EncoderError> {
+    let mut options = EncoderOptions::default();
+    let Some(metadata) = metadata else {
+        return Ok(options);
+    };
+    for (key, value) in metadata {
+        match key.as_str() {
+            // libavif deprecated the old min/max quantizer pair in favor of
+            // qcolor/qalpha. rav1e's still-picture path has one constant
+            // quality value, so both legacy bounds are accepted as aliases
+            // for that value rather than being silently ignored.
+            "quality" | "qcolor" | "min" | "max" => options.quality = metadata_u8(value, key)?,
+            "quality_alpha" | "qalpha" | "minalpha" | "maxalpha" => {
+                options.quality_alpha = metadata_u8(value, key)?
+            }
+            "speed" => options.speed = metadata_speed(value, key)?,
+            "jobs" => options.jobs = metadata_jobs(value, key)?,
+            "lossless" => options.lossless = metadata_bool(value, key)?,
+            "tile_rows_log2" | "tilerowslog2" => options.tile_rows_log2 = metadata_u8(value, key)?,
+            "tile_cols_log2" | "tilecolslog2" => options.tile_cols_log2 = metadata_u8(value, key)?,
+            "advanced" => parse_advanced(value, &mut options.advanced, key)?,
+            _ => {}
+        }
+    }
+    Ok(options)
+}
+
+fn parse_advanced(value: &DataMap, advanced: &mut Metadata, key: &str) -> Result<(), EncoderError> {
+    let DataMap::Ascii(value) = value else {
+        return Err(EncoderError::InvalidParam(format!(
+            "{key} must be an ASCII comma-separated key=value list"
+        )));
+    };
+    for entry in value.split([',', ';']) {
+        let Some((name, setting)) = entry.split_once('=') else {
+            return Err(EncoderError::InvalidParam(format!(
+                "advanced option {entry} must use key=value"
+            )));
+        };
+        advanced.insert(
+            name.trim().to_string(),
+            DataMap::Ascii(setting.trim().to_string()),
+        );
+    }
+    Ok(())
+}
+
+fn apply_advanced(
+    config: &mut Rav1eEncoderConfig,
+    advanced: &Metadata,
+) -> Result<(), EncoderError> {
+    for (key, value) in advanced {
+        match key.as_str() {
+            "multiref" => config.speed_settings.multiref = metadata_bool(value, key)?,
+            "fast-deblock" | "fast_deblock" => {
+                config.speed_settings.fast_deblock = metadata_bool(value, key)?
+            }
+            "lru-on-skip" | "lru_on_skip" => {
+                config.speed_settings.lru_on_skip = metadata_bool(value, key)?
+            }
+            "cdef" => config.speed_settings.cdef = metadata_bool(value, key)?,
+            "lrf" | "restoration" => config.speed_settings.lrf = metadata_bool(value, key)?,
+            "tx-domain-distortion" | "tx_domain_distortion" => {
+                config.speed_settings.transform.tx_domain_distortion = metadata_bool(value, key)?
+            }
+            "tx-domain-rate" | "tx_domain_rate" => {
+                config.speed_settings.transform.tx_domain_rate = metadata_bool(value, key)?
+            }
+            "rdo-tx-decision" | "rdo_tx_decision" => {
+                config.speed_settings.transform.rdo_tx_decision = metadata_bool(value, key)?
+            }
+            "enable-inter-tx-split" | "enable_inter_tx_split" => {
+                config.speed_settings.transform.enable_inter_tx_split = metadata_bool(value, key)?
+            }
+            "encode-bottomup" | "encode_bottomup" => {
+                config.speed_settings.partition.encode_bottomup = metadata_bool(value, key)?
+            }
+            "reduced-tx-set" | "reduced_tx_set" => {
+                config.speed_settings.transform.reduced_tx_set = metadata_bool(value, key)?
+            }
+            "include-near-mvs" | "include_near_mvs" => {
+                config.speed_settings.motion.include_near_mvs = metadata_bool(value, key)?
+            }
+            "use-satd-subpel" | "use_satd_subpel" => {
+                config.speed_settings.motion.use_satd_subpel = metadata_bool(value, key)?
+            }
+            "me-allow-full-search" | "me_allow_full_search" => {
+                config.speed_settings.motion.me_allow_full_search = metadata_bool(value, key)?
+            }
+            "fine-directional-intra" | "fine_directional_intra" => {
+                config.speed_settings.prediction.fine_directional_intra = metadata_bool(value, key)?
+            }
+            "rdo-lookahead-frames" | "rdo_lookahead_frames" => {
+                config.speed_settings.rdo_lookahead_frames = metadata_usize(value, key)?
+            }
+            "tune" => config.tune = metadata_tune(value, key)?,
+            "low-latency" | "low_latency" => config.low_latency = metadata_bool(value, key)?,
+            _ => {
+                return Err(EncoderError::Unsupported(format!(
+                    "unsupported advanced codec option {key}"
+                )));
+            }
+        }
+    }
+    Ok(())
+}
+
+fn metadata_u8(value: &DataMap, key: &str) -> Result<u8, EncoderError> {
+    match value {
+        DataMap::UInt(value) => u8::try_from(*value)
+            .map_err(|_| EncoderError::InvalidParam(format!("{key} must fit in u8"))),
+        _ => Err(EncoderError::InvalidParam(format!("{key} must be UInt"))),
+    }
+}
+
+fn metadata_speed(value: &DataMap, key: &str) -> Result<u8, EncoderError> {
+    match value {
+        DataMap::UInt(_) => metadata_u8(value, key),
+        DataMap::Ascii(value) if value.eq_ignore_ascii_case("default") || value == "d" => {
+            Ok(EncoderOptions::default().speed)
+        }
+        _ => Err(EncoderError::InvalidParam(format!(
+            "{key} must be a numeric speed or default"
+        ))),
+    }
+}
+
+fn metadata_jobs(value: &DataMap, key: &str) -> Result<usize, EncoderError> {
+    match value {
+        DataMap::UInt(value) => usize::try_from(*value)
+            .map_err(|_| EncoderError::InvalidParam(format!("{key} must fit in usize"))),
+        DataMap::Ascii(value) if value.eq_ignore_ascii_case("all") => Ok(0),
+        _ => Err(EncoderError::InvalidParam(format!(
+            "{key} must be a numeric worker count or all"
+        ))),
+    }
+}
+
+fn metadata_bool(value: &DataMap, key: &str) -> Result<bool, EncoderError> {
+    match value {
+        DataMap::UInt(value) => Ok(*value != 0),
+        DataMap::Ascii(value) if value.eq_ignore_ascii_case("true") => Ok(true),
+        DataMap::Ascii(value) if value.eq_ignore_ascii_case("false") => Ok(false),
+        _ => Err(EncoderError::InvalidParam(format!("{key} must be boolean"))),
+    }
+}
+
+fn metadata_tune(value: &DataMap, key: &str) -> Result<Tune, EncoderError> {
+    match value {
+        DataMap::Ascii(value) if value.eq_ignore_ascii_case("psnr") => Ok(Tune::Psnr),
+        DataMap::Ascii(value)
+            if value.eq_ignore_ascii_case("psychovisual") || value.eq_ignore_ascii_case("psy") =>
+        {
+            Ok(Tune::Psychovisual)
+        }
+        _ => Err(EncoderError::InvalidParam(format!(
+            "{key} must be psnr or psychovisual"
+        ))),
+    }
+}
+
+fn metadata_usize(value: &DataMap, key: &str) -> Result<usize, EncoderError> {
+    match value {
+        DataMap::UInt(value) => usize::try_from(*value)
+            .map_err(|_| EncoderError::InvalidParam(format!("{key} must fit in usize"))),
+        DataMap::Ascii(value) => value
+            .parse()
+            .map_err(|_| EncoderError::InvalidParam(format!("{key} must be an integer"))),
+        _ => Err(EncoderError::InvalidParam(format!(
+            "{key} must be an integer"
+        ))),
+    }
+}
+
+fn chroma_dimensions(width: usize, height: usize, sampling: Sampling) -> (usize, usize) {
+    match sampling {
+        Sampling::Cs400 => (width, height),
+        Sampling::Cs420 => (width.div_ceil(2), height.div_ceil(2)),
+        Sampling::Cs422 => (width.div_ceil(2), height),
+        Sampling::Cs444 => (width, height),
+    }
+}
+
+fn chroma_width(width: usize) -> usize {
+    width.div_ceil(2)
+}
+fn chroma_height(height: usize) -> usize {
+    height.div_ceil(2)
+}
+
+fn rgb_to_yuv(red: u8, green: u8, blue: u8) -> (u8, u8, u8) {
+    let (y, u, v) = rgb_to_yuv_u32(u32::from(red), u32::from(green), u32::from(blue), 255);
+    (y as u8, u as u8, v as u8)
+}
+
+fn rgb_to_yuv_u32(red: u32, green: u32, blue: u32, max: u32) -> (u32, u32, u32) {
+    let red = red as f64;
+    let green = green as f64;
+    let blue = blue as f64;
+    let max_f = max as f64;
+    let y = (0.299 * red + 0.587 * green + 0.114 * blue).round();
+    let u = (-0.168736 * red - 0.331264 * green + 0.5 * blue + max_f / 2.0).round();
+    let v = (0.5 * red - 0.418688 * green - 0.081312 * blue + max_f / 2.0).round();
+    (
+        y.clamp(0.0, max_f) as u32,
+        u.clamp(0.0, max_f) as u32,
+        v.clamp(0.0, max_f) as u32,
+    )
+}
+
+fn scale_u16(value: u16, max: u32) -> u32 {
+    ((u32::from(value) * max + 32767) / 65535).min(max)
+}
