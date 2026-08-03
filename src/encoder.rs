@@ -1367,39 +1367,43 @@ fn rgba_to_yuv420(image: &ImageBuffer) -> (Vec<u16>, Vec<u16>, Vec<u16>, Option<
     let chroma_width = chroma_width(image.width);
     let chroma_height = chroma_height(image.height);
     let mut y = vec![0u16; image.width * image.height];
-    let mut u_sum = vec![0u32; chroma_width * chroma_height];
-    let mut v_sum = vec![0u32; chroma_width * chroma_height];
+    let mut red_sum = vec![0u32; chroma_width * chroma_height];
+    let mut green_sum = vec![0u32; chroma_width * chroma_height];
+    let mut blue_sum = vec![0u32; chroma_width * chroma_height];
     let mut chroma_count = vec![0u32; chroma_width * chroma_height];
     let mut alpha = vec![0u16; image.width * image.height];
     let mut has_alpha = false;
     for row in 0..image.height {
         for column in 0..image.width {
             let offset = (row * image.width + column) * 4;
-            let (yy, uu, vv) = rgb_to_yuv(
-                image.rgba[offset],
-                image.rgba[offset + 1],
-                image.rgba[offset + 2],
-            );
+            let red = image.rgba[offset];
+            let green = image.rgba[offset + 1];
+            let blue = image.rgba[offset + 2];
+            let yy = rgb_to_y_jpeg(red, green, blue);
             y[row * image.width + column] = u16::from(yy);
             let chroma_index = (row / 2) * chroma_width + column / 2;
-            u_sum[chroma_index] += u32::from(uu);
-            v_sum[chroma_index] += u32::from(vv);
+            red_sum[chroma_index] += u32::from(red);
+            green_sum[chroma_index] += u32::from(green);
+            blue_sum[chroma_index] += u32::from(blue);
             chroma_count[chroma_index] += 1;
             let a = image.rgba[offset + 3];
             alpha[row * image.width + column] = u16::from(a);
             has_alpha |= a != u8::MAX;
         }
     }
-    let u = u_sum
+    let (u, v): (Vec<u16>, Vec<u16>) = red_sum
         .into_iter()
-        .zip(chroma_count.iter().copied())
-        .map(|(sum, count)| ((sum + count / 2) / count) as u16)
-        .collect();
-    let v = v_sum
-        .into_iter()
-        .zip(chroma_count.iter().copied())
-        .map(|(sum, count)| ((sum + count / 2) / count) as u16)
-        .collect();
+        .zip(green_sum)
+        .zip(blue_sum)
+        .zip(chroma_count)
+        .map(|(((red, green), blue), count)| {
+            let red = ((red + count / 2) / count) as u8;
+            let green = ((green + count / 2) / count) as u8;
+            let blue = ((blue + count / 2) / count) as u8;
+            let (u, v) = rgb_to_uv_jpeg(red, green, blue);
+            (u as u16, v as u16)
+        })
+        .unzip();
     (y, u, v, has_alpha.then_some(alpha))
 }
 
@@ -1717,9 +1721,14 @@ fn chroma_height(height: usize) -> usize {
     height.div_ceil(2)
 }
 
-fn rgb_to_yuv(red: u8, green: u8, blue: u8) -> (u8, u8, u8) {
-    let (y, u, v) = rgb_to_yuv_u32(u32::from(red), u32::from(green), u32::from(blue), 255);
-    (y as u8, u as u8, v as u8)
+fn rgb_to_y_jpeg(red: u8, green: u8, blue: u8) -> u8 {
+    ((77 * u32::from(red) + 150 * u32::from(green) + 29 * u32::from(blue) + 128) >> 8) as u8
+}
+
+fn rgb_to_uv_jpeg(red: u8, green: u8, blue: u8) -> (u8, u8) {
+    let u = (128i32 * i32::from(blue) - 85 * i32::from(green) - 43 * i32::from(red) + 0x8000) >> 8;
+    let v = (128i32 * i32::from(red) - 107 * i32::from(green) - 21 * i32::from(blue) + 0x8000) >> 8;
+    (u as u8, v as u8)
 }
 
 fn rgb_to_yuv_u32(red: u32, green: u32, blue: u32, max: u32) -> (u32, u32, u32) {
@@ -1744,8 +1753,8 @@ fn scale_u16(value: u16, max: u32) -> u32 {
 #[cfg(test)]
 mod tests {
     use super::{
-        apply_advanced, apply_compression_defaults, quality_to_quantizer,
-        should_try_complete_keyframe_search,
+        apply_advanced, apply_compression_defaults, quality_to_quantizer, rgb_to_uv_jpeg,
+        rgb_to_y_jpeg, should_try_complete_keyframe_search,
     };
     use crate::EncoderOptions;
     use crate::compat::DataMap;
@@ -1775,6 +1784,14 @@ mod tests {
                 "quality={quality}"
             );
         }
+    }
+
+    #[test]
+    fn rgba8_yuv_conversion_matches_libyuv_jpeg_coefficients() {
+        assert_eq!(rgb_to_y_jpeg(255, 0, 0), 77);
+        assert_eq!(rgb_to_uv_jpeg(255, 0, 0), (85, 255));
+        assert_eq!(rgb_to_y_jpeg(255, 255, 255), 255);
+        assert_eq!(rgb_to_uv_jpeg(255, 255, 255), (128, 128));
     }
 
     #[test]
