@@ -56,7 +56,7 @@ includes the FFmpeg process invocation, so it is an end-to-end reference and
 not a direct comparison of the AVIF encoder's in-process core timing. The
 libavif timing similarly includes the `avifenc` process invocation. The
 libavif row uses `--yuv 420`, `--jobs all`, and matching `--qcolor`/`--qalpha`.
-The default path enables full transform RDO, complex segmentation,
+The default path enables full transform RDO, full segmentation search,
 pixel-domain distortion, and bottom-up partition search for compression at
 every speed;
 the explicit `rdo_tx_decision=false,reduced_tx_set=true` metadata combination

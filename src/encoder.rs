@@ -451,7 +451,7 @@ fn apply_compression_defaults(config: &mut Rav1eEncoderConfig, options: &Encoder
     if !has_reduced_tx_setting {
         config.speed_settings.transform.reduced_tx_set = false;
     }
-    config.speed_settings.segmentation = SegmentationLevel::Complex;
+    config.speed_settings.segmentation = SegmentationLevel::Full;
     // rav1e's temporal-RDO path uses pixel-domain distortion. This is the
     // more compression-oriented choice for still images, and also matches
     // the libavif rate-distortion path used by the comparison benchmark.
@@ -1733,10 +1733,7 @@ mod tests {
         assert!(!config.speed_settings.transform.reduced_tx_set);
         assert!(!config.speed_settings.transform.tx_domain_distortion);
         assert!(config.speed_settings.partition.encode_bottomup);
-        assert_eq!(
-            config.speed_settings.segmentation,
-            SegmentationLevel::Complex
-        );
+        assert_eq!(config.speed_settings.segmentation, SegmentationLevel::Full);
 
         let options = EncoderOptions {
             speed: 10,
@@ -1748,10 +1745,7 @@ mod tests {
         assert!(!config.speed_settings.transform.reduced_tx_set);
         assert!(!config.speed_settings.transform.tx_domain_distortion);
         assert!(config.speed_settings.partition.encode_bottomup);
-        assert_eq!(
-            config.speed_settings.segmentation,
-            SegmentationLevel::Complex
-        );
+        assert_eq!(config.speed_settings.segmentation, SegmentationLevel::Full);
 
         let mut options = EncoderOptions::default();
         options.advanced.insert(
