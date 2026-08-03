@@ -64,6 +64,40 @@ pub static PARTITION_W64: [[u16; 10]; 4] = [
 /// `Default_Skip_Cdf`, indexed [ctx].
 pub static SKIP: [[u16; 2]; 3] = [[31671, 32768], [16515, 32768], [4576, 32768]];
 
+/// `Default_Palette_Y_Mode_Cdf`, indexed by block-size and neighbouring-palette contexts.
+pub static PALETTE_Y_MODE: [[[u16; 2]; 3]; 7] = [
+    [[31676, 32768], [3419, 32768], [1261, 32768]],
+    [[31912, 32768], [2859, 32768], [980, 32768]],
+    [[31823, 32768], [3400, 32768], [781, 32768]],
+    [[32030, 32768], [3561, 32768], [904, 32768]],
+    [[32309, 32768], [7337, 32768], [1462, 32768]],
+    [[32265, 32768], [4015, 32768], [1521, 32768]],
+    [[32450, 32768], [7946, 32768], [129, 32768]],
+];
+/// `Default_Palette_Uv_Mode_Cdf`, indexed by whether a luma palette was used.
+pub static PALETTE_UV_MODE: [[u16; 2]; 2] = [[32461, 32768], [21488, 32768]];
+/// `Default_Palette_Y_Size_Cdf`, indexed by block-size context. Only symbol 0
+/// (palette size 2) is selected by the initial encoder.
+pub static PALETTE_Y_SIZE: [[u16; 7]; 7] = [
+    [7952, 13000, 18149, 21478, 25527, 29241, 32768],
+    [7139, 11421, 16195, 19544, 23666, 28073, 32768],
+    [7788, 12741, 17325, 20500, 24315, 28530, 32768],
+    [8271, 14064, 18246, 21564, 25071, 28533, 32768],
+    [12725, 19180, 21863, 24839, 27535, 30120, 32768],
+    [9711, 14888, 16923, 21052, 25661, 27875, 32768],
+    [14940, 20797, 21678, 24186, 27033, 28999, 32768],
+];
+/// `Default_Palette_Size_2_Y_Color_Cdf`, indexed by palette colour context.
+pub static PALETTE_SIZE_2_Y_COLOR: [[u16; 2]; 5] = [
+    [28710, 32768],
+    [16384, 32768],
+    [10553, 32768],
+    [27036, 32768],
+    [31603, 32768],
+];
+/// `Palette_Color_Context` lookup for the neighbour hash.
+pub static PALETTE_COLOR_CONTEXT: [i8; 9] = [-1, -1, 0, -1, -1, 4, 3, 2, 1];
+
 /// `Default_Intra_Frame_Y_Mode_Cdf[0][0]` (above/left both `DC_PRED`).
 pub static INTRA_FRAME_Y_MODE_DC_DC: [u16; 13] = [
     15588, 17027, 19338, 20218, 20682, 21110, 21825, 23244, 24189, 28165, 29093, 30466, 32768,

@@ -11,6 +11,11 @@ use crate::lossless_cdf as cdf;
 use crate::lossless_types::LosslessPlanes;
 use gamut_bitstream::SymbolEncoder;
 
+struct PaletteBlock {
+    colors: [u16; 2],
+    index_map: Vec<u8>,
+}
+
 /// `NUM_BASE_LEVELS` (§3).
 const NUM_BASE_LEVELS: i32 = 2;
 /// `NUM_BASE_LEVELS + COEFF_BASE_RANGE`, the golomb threshold (§5.11.39).
@@ -36,6 +41,12 @@ pub(crate) struct FrameEncoder<'a> {
     left_dc: Vec<Vec<u8>>,
     /// `Mi_Width_Log2` of the block covering each MI cell (for the partition context).
     mi_bsl: Vec<u8>,
+    /// Whether the block covering each MI cell was coded with `skip = 1`.
+    mi_skip: Vec<bool>,
+    /// Palette size of the block covering each MI cell (zero for no palette).
+    mi_palette_size: Vec<u8>,
+    /// Sorted luma palette colours of the block covering each MI cell.
+    mi_palette_colors: Vec<[u16; 2]>,
 }
 
 impl<'a> FrameEncoder<'a> {
@@ -164,6 +175,9 @@ impl<'a> FrameEncoder<'a> {
                 })
                 .collect(),
             mi_bsl: vec![0; mi_cols * mi_rows],
+            mi_skip: vec![false; mi_cols * mi_rows],
+            mi_palette_size: vec![0; mi_cols * mi_rows],
+            mi_palette_colors: vec![[0; 2]; mi_cols * mi_rows],
         }
     }
 
@@ -249,9 +263,13 @@ impl<'a> FrameEncoder<'a> {
     fn encode_block(&mut self, r: usize, c: usize, bw: usize) {
         let n4 = bw / 4;
         let bsl = n4.trailing_zeros() as u8;
+        let palette = self.palette_block(r, c, bw);
+        let skip = palette.is_some() || self.block_is_skippable(r, c, bw);
 
-        // intra_frame_mode_info: skip=0 (ctx 0), y_mode=DC_PRED (ctx [0][0]), uv_mode=DC_PRED.
-        self.sym.encode_symbol(0, &cdf::SKIP[0]);
+        // intra_frame_mode_info: skip, then y_mode=DC_PRED (ctx [0][0]), uv_mode=DC_PRED.
+        let skip_ctx = self.skip_ctx(r, c);
+        self.sym
+            .encode_symbol(usize::from(skip), &cdf::SKIP[skip_ctx]);
         self.sym.encode_symbol(0, &cdf::INTRA_FRAME_Y_MODE_DC_DC);
         let chroma_reference = !self.monochrome && self.is_chroma_reference(r, c, bw);
         if chroma_reference {
@@ -268,13 +286,45 @@ impl<'a> FrameEncoder<'a> {
             self.sym.encode_symbol(0, uv);
         }
 
+        if bw >= 8 {
+            let block_size_context = palette_block_size_context(bw);
+            let palette_context = self.palette_context(r, c);
+            let has_palette = palette.is_some();
+            self.sym.encode_symbol(
+                usize::from(has_palette),
+                &cdf::PALETTE_Y_MODE[block_size_context][palette_context],
+            );
+            if let Some(palette) = palette.as_ref() {
+                self.sym
+                    .encode_symbol(0, &cdf::PALETTE_Y_SIZE[block_size_context]);
+                let cache = self.palette_cache(r, c);
+                self.signal_palette_colors(palette.colors, &cache);
+                self.signal_palette_tokens(&palette.index_map, bw);
+            }
+            if chroma_reference {
+                // This encoder only selects luma palette mode. The chroma
+                // palette flag is still present when screen tools are enabled.
+                self.sym
+                    .encode_symbol(0, &cdf::PALETTE_UV_MODE[usize::from(has_palette)]);
+            }
+        }
+
         for y in 0..n4 {
             for x in 0..n4 {
                 let (rr, cc) = (r + y, c + x);
                 if rr < self.mi_rows && cc < self.mi_cols {
                     self.mi_bsl[rr * self.mi_cols + cc] = bsl;
+                    self.mi_skip[rr * self.mi_cols + cc] = skip;
+                    self.mi_palette_size[rr * self.mi_cols + cc] = u8::from(palette.is_some()) * 2;
+                    self.mi_palette_colors[rr * self.mi_cols + cc] =
+                        palette.as_ref().map_or([0; 2], |value| value.colors);
                 }
             }
+        }
+
+        if skip {
+            self.clear_plane_contexts(r, c, bw);
+            return;
         }
 
         // residual(): decoder order is luma, then U/V only for chroma-reference blocks.
@@ -294,6 +344,196 @@ impl<'a> FrameEncoder<'a> {
             && (!mi_col.is_multiple_of(2)
                 || block_mi_width.is_multiple_of(2)
                 || self.subsampling_x == 0)
+    }
+
+    fn skip_ctx(&self, r: usize, c: usize) -> usize {
+        let above = r > 0 && self.mi_skip[(r - 1) * self.mi_cols + c];
+        let left = c > 0 && self.mi_skip[r * self.mi_cols + (c - 1)];
+        usize::from(above) + usize::from(left)
+    }
+
+    fn block_is_skippable(&self, r: usize, c: usize, bw: usize) -> bool {
+        for plane in 0..self.planes.len() {
+            let shift_x = if plane == 0 { 0 } else { self.subsampling_x };
+            let shift_y = if plane == 0 { 0 } else { self.subsampling_y };
+            let sx = (c * 4) >> shift_x;
+            let sy = (r * 4) >> shift_y;
+            let unit_w = (bw >> shift_x).max(4);
+            let unit_h = (bw >> shift_y).max(4);
+            let value = self.sample(plane, sx, sy);
+            for y in 0..unit_h {
+                for x in 0..unit_w {
+                    if self.sample(plane, sx + x, sy + y) != value {
+                        return false;
+                    }
+                }
+            }
+            if self.dc_avg(plane, sx, sy) != value {
+                return false;
+            }
+        }
+        true
+    }
+
+    /// Selects the deliberately narrow palette path: monochrome blocks with
+    /// exactly two colours. The palette cache is handled separately when the
+    /// block is signalled, which keeps bilevel documents compact.
+    fn palette_block(&self, r: usize, c: usize, bw: usize) -> Option<PaletteBlock> {
+        if !self.monochrome || bw < 8 {
+            return None;
+        }
+        let mut colors = [None, None];
+        for y in 0..bw {
+            for x in 0..bw {
+                let value = self.sample(0, c * 4 + x, r * 4 + y) as u16;
+                if colors[0] == Some(value) || colors[1] == Some(value) {
+                    continue;
+                }
+                if colors[0].is_none() {
+                    colors[0] = Some(value);
+                } else if colors[1].is_none() {
+                    colors[1] = Some(value);
+                } else {
+                    return None;
+                }
+            }
+        }
+        let [Some(first), Some(second)] = colors else {
+            return None;
+        };
+        let sorted = if first < second {
+            [first, second]
+        } else {
+            [second, first]
+        };
+        let mut index_map = Vec::with_capacity(bw * bw);
+        for y in 0..bw {
+            for x in 0..bw {
+                let value = self.sample(0, c * 4 + x, r * 4 + y) as u16;
+                index_map.push(u8::from(value == sorted[1]));
+            }
+        }
+        Some(PaletteBlock {
+            colors: sorted,
+            index_map,
+        })
+    }
+
+    fn palette_context(&self, r: usize, c: usize) -> usize {
+        let above = r > 0 && self.mi_palette_size[(r - 1) * self.mi_cols + c] != 0;
+        let left = c > 0 && self.mi_palette_size[r * self.mi_cols + (c - 1)] != 0;
+        usize::from(above) + usize::from(left)
+    }
+
+    fn palette_cache(&self, r: usize, c: usize) -> Vec<u16> {
+        let above_n = if r.is_multiple_of(16) {
+            0
+        } else {
+            usize::from(self.mi_palette_size[(r - 1) * self.mi_cols + c])
+        };
+        let left_n = if c == 0 {
+            0
+        } else {
+            usize::from(self.mi_palette_size[r * self.mi_cols + (c - 1)])
+        };
+        let above = self.mi_palette_colors[(r.saturating_sub(1)) * self.mi_cols + c];
+        let left = self.mi_palette_colors[r * self.mi_cols + c.saturating_sub(1)];
+        let mut cache = Vec::new();
+        for color in above[..above_n.min(2)]
+            .iter()
+            .chain(left[..left_n.min(2)].iter())
+        {
+            if !cache.contains(color) {
+                cache.push(*color);
+            }
+        }
+        cache.sort_unstable();
+        cache
+    }
+
+    fn signal_palette_colors(&mut self, colors: [u16; 2], cache: &[u16]) {
+        let mut cached = [false; 4];
+        let mut cached_count = 0;
+        for (index, &color) in cache.iter().enumerate() {
+            let use_color = colors.contains(&color);
+            self.sym.encode_literal(u32::from(use_color), 1);
+            if use_color {
+                cached[index] = true;
+                cached_count += 1;
+            }
+            if cached_count == 2 {
+                break;
+            }
+        }
+        let transmitted = colors
+            .into_iter()
+            .filter(|color| {
+                !cache
+                    .iter()
+                    .enumerate()
+                    .any(|(index, cached_color)| cached[index] && cached_color == color)
+            })
+            .collect::<Vec<_>>();
+        if transmitted.is_empty() {
+            return;
+        }
+        let bit_depth = u32::from(self.bit_depth);
+        self.sym
+            .encode_literal(u32::from(transmitted[0]), bit_depth);
+        if transmitted.len() > 1 {
+            // palette_num_extra_bits_y = 3, hence palette_bits == bit_depth.
+            self.sym.encode_literal(3, 2);
+            self.sym
+                .encode_literal(u32::from(transmitted[1] - transmitted[0] - 1), bit_depth);
+        }
+    }
+
+    fn signal_palette_tokens(&mut self, index_map: &[u8], bw: usize) {
+        encode_ns(&mut self.sym, usize::from(index_map[0]), 2);
+        for diagonal in 1..(2 * bw - 1) {
+            let start = diagonal.min(bw - 1);
+            let end = diagonal.saturating_sub(bw - 1);
+            let mut col = start;
+            loop {
+                let row = diagonal - col;
+                let (order, context) = palette_color_context(index_map, bw, row, col);
+                let actual = usize::from(index_map[row * bw + col]);
+                let symbol = order.iter().position(|&value| value == actual).unwrap_or(0);
+                self.sym
+                    .encode_symbol(symbol, &cdf::PALETTE_SIZE_2_Y_COLOR[context]);
+                if col == end {
+                    break;
+                }
+                col -= 1;
+            }
+        }
+    }
+
+    fn clear_plane_contexts(&mut self, r: usize, c: usize, bw: usize) {
+        for plane in 0..self.planes.len() {
+            let shift_x = if plane == 0 { 0 } else { self.subsampling_x };
+            let shift_y = if plane == 0 { 0 } else { self.subsampling_y };
+            let sx = (c * 4) >> shift_x;
+            let sy = (r * 4) >> shift_y;
+            let unit_w = (bw >> shift_x).max(4);
+            let unit_h = (bw >> shift_y).max(4);
+            let n_x = unit_w.div_ceil(4);
+            let n_y = unit_h.div_ceil(4);
+            for x in 0..n_x {
+                let index = (sx >> 2) + x;
+                if index < self.above_level[plane].len() {
+                    self.above_level[plane][index] = 0;
+                    self.above_dc[plane][index] = 0;
+                }
+            }
+            for y in 0..n_y {
+                let index = (sy >> 2) + y;
+                if index < self.left_level[plane].len() {
+                    self.left_level[plane][index] = 0;
+                    self.left_dc[plane][index] = 0;
+                }
+            }
+        }
     }
 
     fn encode_plane_unit(&mut self, plane: usize, r: usize, c: usize, bw: usize) {
@@ -535,6 +775,68 @@ impl<'a> FrameEncoder<'a> {
             0
         }
     }
+}
+
+fn palette_block_size_context(bw: usize) -> usize {
+    (2 * bw.ilog2() as usize).saturating_sub(6).min(6)
+}
+
+fn encode_ns(sym: &mut SymbolEncoder, value: usize, n: usize) {
+    if n <= 1 {
+        return;
+    }
+    let w = n.ilog2() + 1;
+    let m = (1usize << w) - n;
+    if value < m {
+        sym.encode_literal(value as u32, w - 1);
+    } else {
+        let coded = value + m;
+        sym.encode_literal((coded >> 1) as u32, w - 1);
+        sym.encode_literal((coded & 1) as u32, 1);
+    }
+}
+
+fn palette_color_context(
+    index_map: &[u8],
+    bw: usize,
+    row: usize,
+    col: usize,
+) -> ([usize; 8], usize) {
+    let mut scores = [0i32; 8];
+    if col > 0 {
+        scores[usize::from(index_map[row * bw + col - 1])] += 2;
+    }
+    if row > 0 && col > 0 {
+        scores[usize::from(index_map[(row - 1) * bw + col - 1])] += 1;
+    }
+    if row > 0 {
+        scores[usize::from(index_map[(row - 1) * bw + col])] += 2;
+    }
+    let mut order = [0usize; 8];
+    for (index, value) in order.iter_mut().enumerate() {
+        *value = index;
+    }
+    for index in 0..2 {
+        let mut max_index = index;
+        for candidate in index..2 {
+            if scores[candidate] > scores[max_index] {
+                max_index = candidate;
+            }
+        }
+        if max_index != index {
+            let score = scores[max_index];
+            let value = order[max_index];
+            for shift in (index + 1..=max_index).rev() {
+                scores[shift] = scores[shift - 1];
+                order[shift] = order[shift - 1];
+            }
+            scores[index] = score;
+            order[index] = value;
+        }
+    }
+    let hash = (scores[0] + scores[1] * 2 + scores[2] * 2) as usize;
+    let context = usize::try_from(cdf::PALETTE_COLOR_CONTEXT[hash]).unwrap_or(0);
+    (order, context)
 }
 
 /// Selects the partition CDF by `bsl` (`Mi_Width_Log2`); M0 never uses 128×128 superblocks.
