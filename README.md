@@ -35,3 +35,19 @@ paths use `rav1e`.
 
 The public-name comparison against `avif-rust` is recorded in
 [`API_COMPATIBILITY.md`](API_COMPATIBILITY.md).
+
+## Encoding benchmark
+
+The benchmark example accepts an RGBA8 raw input and reports encoding time,
+AVIF size, size ratio, and FFmpeg-decoded RGB/alpha error for lossless and
+quality/speed presets:
+
+```text
+cargo run --release --example benchmark -- \
+  input.rgba 1152 896 ffmpeg benchmark-output 1
+```
+
+The output is CSV on stdout. `mae_rgb`, `max_rgb`, and `psnr_rgb` describe
+RGB degradation against the raw input; `size_ratio` is AVIF bytes divided by
+raw RGBA bytes. Use an FFmpeg executable path as the fourth argument when it
+is not available on `PATH`.
