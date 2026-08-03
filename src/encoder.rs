@@ -1,6 +1,7 @@
 use rav1e::prelude::{
     ChromaSampling, ColorDescription, ColorPrimaries, Config, EncoderConfig as Rav1eEncoderConfig,
-    EncoderStatus, MatrixCoefficients, PixelRange, Rational, TransferCharacteristics, Tune,
+    EncoderStatus, MatrixCoefficients, PixelRange, Rational, SegmentationLevel,
+    TransferCharacteristics, Tune,
 };
 
 use crate::compat::{DataMap, EncodeOptions, EncoderOptions, Metadata, PickOptions};
@@ -450,6 +451,7 @@ fn apply_compression_defaults(config: &mut Rav1eEncoderConfig, options: &Encoder
     if !has_reduced_tx_setting {
         config.speed_settings.transform.reduced_tx_set = false;
     }
+    config.speed_settings.segmentation = SegmentationLevel::Complex;
     // rav1e's temporal-RDO path uses pixel-domain distortion. This is the
     // more compression-oriented choice for still images, and also matches
     // the libavif rate-distortion path used by the comparison benchmark.
@@ -1695,7 +1697,7 @@ mod tests {
     use crate::EncoderOptions;
     use crate::compat::DataMap;
     use crate::compat::Metadata;
-    use rav1e::prelude::EncoderConfig as Rav1eEncoderConfig;
+    use rav1e::prelude::{EncoderConfig as Rav1eEncoderConfig, SegmentationLevel};
 
     #[test]
     fn quality_mapping_matches_libavif_rav1e_backend() {
@@ -1731,6 +1733,10 @@ mod tests {
         assert!(!config.speed_settings.transform.reduced_tx_set);
         assert!(!config.speed_settings.transform.tx_domain_distortion);
         assert!(config.speed_settings.partition.encode_bottomup);
+        assert_eq!(
+            config.speed_settings.segmentation,
+            SegmentationLevel::Complex
+        );
 
         let options = EncoderOptions {
             speed: 10,
@@ -1742,6 +1748,10 @@ mod tests {
         assert!(!config.speed_settings.transform.reduced_tx_set);
         assert!(!config.speed_settings.transform.tx_domain_distortion);
         assert!(config.speed_settings.partition.encode_bottomup);
+        assert_eq!(
+            config.speed_settings.segmentation,
+            SegmentationLevel::Complex
+        );
 
         let mut options = EncoderOptions::default();
         options.advanced.insert(
