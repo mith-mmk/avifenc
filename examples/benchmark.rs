@@ -12,6 +12,11 @@ struct BenchmarkCase {
     options: EncoderOptions,
 }
 
+struct WebpBenchmarkCase {
+    name: &'static str,
+    quality: Option<u8>,
+}
+
 struct RgbError {
     mae: f64,
     maximum: u8,
@@ -55,7 +60,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     let cases = benchmark_cases();
 
     println!(
-        "case,iterations,mean_ms,min_ms,avif_bytes,size_ratio,mae_rgb,max_rgb,psnr_rgb,mae_alpha"
+        "codec,case,iterations,mean_ms,min_ms,bytes,size_ratio,mae_rgb,max_rgb,psnr_rgb,mae_alpha"
     );
     for case in cases {
         let mut encoded = None;
@@ -69,23 +74,52 @@ fn main() -> Result<(), Box<dyn Error>> {
         let encoded = encoded.expect("at least one iteration must run");
         let output = output_dir.join(format!("{}.avif", case.name));
         fs::write(&output, &encoded)?;
-        let decoded = decode_with_ffmpeg(&ffmpeg, &output, width, height, &output_dir, case.name)?;
-        let rgb_error = rgb_error(&image.rgba, &decoded);
-        let alpha_error = alpha_mae(&image.rgba, &decoded);
-        let mean = durations.iter().copied().sum::<Duration>() / iterations as u32;
-        let minimum = durations.iter().copied().min().unwrap_or_default();
-        let size_ratio = encoded.len() as f64 / image.rgba.len() as f64;
-        println!(
-            "{},{iterations},{:.3},{:.3},{},{:.6},{:.6},{},{:.3},{:.6}",
+        let decoded = decode_with_ffmpeg(
+            &ffmpeg,
+            &output,
+            width,
+            height,
+            &output_dir,
+            "avif",
             case.name,
-            mean.as_secs_f64() * 1000.0,
-            minimum.as_secs_f64() * 1000.0,
+        )?;
+        print_measurement(
+            "avif",
+            case.name,
+            iterations,
+            &durations,
             encoded.len(),
-            size_ratio,
-            rgb_error.mae,
-            rgb_error.maximum,
-            rgb_error.psnr,
-            alpha_error,
+            &image.rgba,
+            &decoded,
+        );
+    }
+
+    for case in webp_benchmark_cases() {
+        let output = output_dir.join(format!("{}.webp", case.name));
+        let mut durations = Vec::with_capacity(iterations);
+        for _ in 0..iterations {
+            let started = Instant::now();
+            encode_webp_with_ffmpeg(&ffmpeg, &input, width, height, case.quality, &output)?;
+            durations.push(started.elapsed());
+        }
+        let encoded = fs::read(&output)?;
+        let decoded = decode_with_ffmpeg(
+            &ffmpeg,
+            &output,
+            width,
+            height,
+            &output_dir,
+            "webp",
+            case.name,
+        )?;
+        print_measurement(
+            "webp",
+            case.name,
+            iterations,
+            &durations,
+            encoded.len(),
+            &image.rgba,
+            &decoded,
         );
     }
     Ok(())
@@ -136,22 +170,122 @@ fn benchmark_cases() -> Vec<BenchmarkCase> {
     cases
 }
 
+fn webp_benchmark_cases() -> Vec<WebpBenchmarkCase> {
+    vec![
+        WebpBenchmarkCase {
+            name: "lossless",
+            quality: None,
+        },
+        WebpBenchmarkCase {
+            name: "q90",
+            quality: Some(90),
+        },
+        WebpBenchmarkCase {
+            name: "q75",
+            quality: Some(75),
+        },
+        WebpBenchmarkCase {
+            name: "q60",
+            quality: Some(60),
+        },
+        WebpBenchmarkCase {
+            name: "q45",
+            quality: Some(45),
+        },
+        WebpBenchmarkCase {
+            name: "q30",
+            quality: Some(30),
+        },
+    ]
+}
+
+fn encode_webp_with_ffmpeg(
+    ffmpeg: &Path,
+    input: &Path,
+    width: usize,
+    height: usize,
+    quality: Option<u8>,
+    output: &Path,
+) -> Result<(), Box<dyn Error>> {
+    let mut command = Command::new(ffmpeg);
+    command
+        .args(["-v", "error", "-y", "-f", "rawvideo", "-pix_fmt", "rgba"])
+        .arg("-video_size")
+        .arg(format!("{width}x{height}"))
+        .arg("-i")
+        .arg(input.to_str().ok_or("raw input path is not valid UTF-8")?)
+        .args(["-frames:v", "1", "-an", "-c:v", "libwebp"]);
+    match quality {
+        Some(value) => {
+            command
+                .args(["-lossless", "0", "-q:v"])
+                .arg(value.to_string());
+        }
+        None => {
+            command.args(["-lossless", "1", "-compression_level", "6"]);
+        }
+    }
+    let result = command
+        .arg(
+            output
+                .to_str()
+                .ok_or("WebP output path is not valid UTF-8")?,
+        )
+        .output()?;
+    if !result.status.success() {
+        return Err(format!(
+            "FFmpeg WebP encode failed: {}",
+            String::from_utf8_lossy(&result.stderr)
+        )
+        .into());
+    }
+    Ok(())
+}
+
+fn print_measurement(
+    codec: &str,
+    case: &str,
+    iterations: usize,
+    durations: &[Duration],
+    encoded_bytes: usize,
+    source: &[u8],
+    decoded: &[u8],
+) {
+    let rgb_error = rgb_error(source, decoded);
+    let alpha_error = alpha_mae(source, decoded);
+    let mean = durations.iter().copied().sum::<Duration>() / iterations as u32;
+    let minimum = durations.iter().copied().min().unwrap_or_default();
+    let size_ratio = encoded_bytes as f64 / source.len() as f64;
+    println!(
+        "{codec},{case},{iterations},{:.3},{:.3},{encoded_bytes},{size_ratio:.6},{:.6},{},{:.3},{:.6}",
+        mean.as_secs_f64() * 1000.0,
+        minimum.as_secs_f64() * 1000.0,
+        rgb_error.mae,
+        rgb_error.maximum,
+        rgb_error.psnr,
+        alpha_error,
+    );
+}
+
 fn decode_with_ffmpeg(
     ffmpeg: &Path,
     input: &Path,
     width: usize,
     height: usize,
     output_dir: &Path,
+    codec: &str,
     case: &str,
 ) -> Result<Vec<u8>, Box<dyn Error>> {
-    let raw = output_dir.join(format!("{case}.rgba"));
+    let raw = output_dir.join(format!("{codec}-{case}.rgba"));
     let result = Command::new(ffmpeg)
         .args([
             "-v",
             "error",
             "-y",
             "-i",
-            input.to_str().ok_or("AVIF path is not valid UTF-8")?,
+            input
+                .to_str()
+                .ok_or("encoded input path is not valid UTF-8")?,
             "-frames:v",
             "1",
             "-f",
@@ -175,7 +309,7 @@ fn decode_with_ffmpeg(
         .ok_or("decoded image dimensions overflow")?;
     if decoded.len() != expected {
         return Err(format!(
-            "FFmpeg decoded {case} to {} bytes; expected {expected}",
+            "FFmpeg decoded {codec}/{case} to {} bytes; expected {expected}",
             decoded.len()
         )
         .into());
