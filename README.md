@@ -65,6 +65,10 @@ restores the faster rav1e transform preset. The benchmark also includes
 `q60-s6-fast`, `q90-s10-rdo`, `q90-s10-rdo-psnr`, and `q90-s9-rdo` to separate
 rav1e preset and tuning differences from the public quality mapping when
 comparing against libavif.
+For the slower presets (speed 0 through 6), the middle `qcolor`/`qalpha`
+range 50 through 65 applies a two-point rav1e rate/distortion calibration;
+this compensates for the different still-image tuning curve while leaving
+the q75/q90 and speed-10 mappings unchanged.
 Grayscale RGBA input is encoded as a single YUV400 plane automatically; this
 avoids three-channel coding for monochrome images while preserving the AVIF
 container contract.

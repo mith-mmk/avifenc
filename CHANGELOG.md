@@ -10,6 +10,9 @@
   search and adaptive keyframe intra-mode search, pixel-domain transform
   decisions, and bottom-up partition search; added validation for an
   incompatible rav1e transform-option combination.
+- Added a limited qcolor/qalpha rate-distortion calibration for rav1e's
+  slower middle-quality presets, bringing the q60 benchmark rate in line
+  with current libavif without changing q75/q90 or speed-10 mapping.
 - Added a private Pure Rust lossless AV1 intra backend for 8/10/12-bit
   4:0:0/4:2:0/4:2:2/4:4:4 native planes, including FFmpeg bit-exact
   verification for subsampled planes, RGBA16 scaling, and an auxiliary alpha
