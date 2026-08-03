@@ -17,6 +17,12 @@ struct WebpBenchmarkCase {
     quality: Option<u8>,
 }
 
+struct LibavifBenchmarkCase {
+    name: &'static str,
+    quality: Option<u8>,
+    speed: u8,
+}
+
 struct RgbError {
     mae: f64,
     maximum: u8,
@@ -29,6 +35,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     let width: usize = args.next().ok_or(Usage)?.parse()?;
     let height: usize = args.next().ok_or(Usage)?.parse()?;
     let ffmpeg = PathBuf::from(args.next().ok_or(Usage)?);
+    let libavif = PathBuf::from(args.next().ok_or(Usage)?);
     let output_dir = PathBuf::from(args.next().ok_or(Usage)?);
     let iterations: usize = args
         .next()
@@ -58,6 +65,8 @@ fn main() -> Result<(), Box<dyn Error>> {
         rgba,
     };
     let cases = benchmark_cases();
+    let source_png = output_dir.join("source.png");
+    encode_png_with_ffmpeg(&ffmpeg, &input, width, height, &source_png)?;
 
     println!(
         "codec,case,iterations,mean_ms,min_ms,bytes,size_ratio,mae_rgb,max_rgb,psnr_rgb,mae_alpha"
@@ -114,6 +123,35 @@ fn main() -> Result<(), Box<dyn Error>> {
         )?;
         print_measurement(
             "webp",
+            case.name,
+            iterations,
+            &durations,
+            encoded.len(),
+            &image.rgba,
+            &decoded,
+        );
+    }
+
+    for case in libavif_benchmark_cases() {
+        let output = output_dir.join(format!("libavif-{}.avif", case.name));
+        let mut durations = Vec::with_capacity(iterations);
+        for _ in 0..iterations {
+            let started = Instant::now();
+            encode_libavif_with_cli(&libavif, &source_png, case.quality, case.speed, &output)?;
+            durations.push(started.elapsed());
+        }
+        let encoded = fs::read(&output)?;
+        let decoded = decode_with_ffmpeg(
+            &ffmpeg,
+            &output,
+            width,
+            height,
+            &output_dir,
+            "libavif",
+            case.name,
+        )?;
+        print_measurement(
+            "libavif",
             case.name,
             iterations,
             &durations,
@@ -197,6 +235,118 @@ fn webp_benchmark_cases() -> Vec<WebpBenchmarkCase> {
             quality: Some(30),
         },
     ]
+}
+
+fn libavif_benchmark_cases() -> Vec<LibavifBenchmarkCase> {
+    vec![
+        LibavifBenchmarkCase {
+            name: "lossless",
+            quality: None,
+            speed: 6,
+        },
+        LibavifBenchmarkCase {
+            name: "q90-s10",
+            quality: Some(90),
+            speed: 10,
+        },
+        LibavifBenchmarkCase {
+            name: "q75-s10",
+            quality: Some(75),
+            speed: 10,
+        },
+        LibavifBenchmarkCase {
+            name: "q60-s10",
+            quality: Some(60),
+            speed: 10,
+        },
+        LibavifBenchmarkCase {
+            name: "q45-s10",
+            quality: Some(45),
+            speed: 10,
+        },
+        LibavifBenchmarkCase {
+            name: "q30-s10",
+            quality: Some(30),
+            speed: 10,
+        },
+        LibavifBenchmarkCase {
+            name: "q60-s6",
+            quality: Some(60),
+            speed: 6,
+        },
+    ]
+}
+
+fn encode_png_with_ffmpeg(
+    ffmpeg: &Path,
+    input: &Path,
+    width: usize,
+    height: usize,
+    output: &Path,
+) -> Result<(), Box<dyn Error>> {
+    let result = Command::new(ffmpeg)
+        .args(["-v", "error", "-y", "-f", "rawvideo", "-pix_fmt", "rgba"])
+        .arg("-video_size")
+        .arg(format!("{width}x{height}"))
+        .arg("-i")
+        .arg(input.to_str().ok_or("raw input path is not valid UTF-8")?)
+        .args(["-frames:v", "1", "-an", "-c:v", "png"])
+        .arg(
+            output
+                .to_str()
+                .ok_or("PNG output path is not valid UTF-8")?,
+        )
+        .output()?;
+    if !result.status.success() {
+        return Err(format!(
+            "FFmpeg PNG encode failed: {}",
+            String::from_utf8_lossy(&result.stderr)
+        )
+        .into());
+    }
+    Ok(())
+}
+
+fn encode_libavif_with_cli(
+    libavif: &Path,
+    input: &Path,
+    quality: Option<u8>,
+    speed: u8,
+    output: &Path,
+) -> Result<(), Box<dyn Error>> {
+    let mut command = Command::new(libavif);
+    command
+        .args(["--jobs", "all", "--speed"])
+        .arg(speed.to_string());
+    match quality {
+        Some(value) => {
+            command
+                .args(["--yuv", "420"])
+                .args(["--qcolor"])
+                .arg(value.to_string())
+                .args(["--qalpha"])
+                .arg(value.to_string());
+        }
+        None => {
+            command.args(["--yuv", "444", "--lossless"]);
+        }
+    }
+    let result = command
+        .arg(input.to_str().ok_or("PNG input path is not valid UTF-8")?)
+        .arg(
+            output
+                .to_str()
+                .ok_or("AVIF output path is not valid UTF-8")?,
+        )
+        .output()?;
+    if !result.status.success() {
+        return Err(format!(
+            "libavif avifenc failed: {}",
+            String::from_utf8_lossy(&result.stderr)
+        )
+        .into());
+    }
+    Ok(())
 }
 
 fn encode_webp_with_ffmpeg(
@@ -356,7 +506,7 @@ struct Usage;
 impl std::fmt::Display for Usage {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter.write_str(
-            "usage: benchmark <input.rgba> <width> <height> <ffmpeg> <output-dir> [iterations]",
+            "usage: benchmark <input.rgba> <width> <height> <ffmpeg> <libavif-avifenc> <output-dir> [iterations]",
         )
     }
 }

@@ -41,17 +41,20 @@ The public-name comparison against `avif-rust` is recorded in
 The benchmark example accepts an RGBA8 raw input and reports encoding time,
 output size, size ratio, and FFmpeg-decoded RGB/alpha error. It compares
 several AVIF quality/speed presets with FFmpeg's `libwebp` encoder at matching
-quality values:
+quality values and libavif's `avifenc` CLI:
 
 ```text
 cargo run --release --example benchmark -- \
-  input.rgba 1152 896 ffmpeg benchmark-output 1
+  input.rgba 1152 896 ffmpeg avifenc benchmark-output 1
 ```
 
-The output is CSV on stdout with one row per `codec,case` pair. `mae_rgb`,
+The output is CSV on stdout with one row per `codec,case` pair (`avif`,
+`libavif`, and `webp`). `mae_rgb`,
 `max_rgb`, and `psnr_rgb` describe RGB degradation against the raw input;
 `size_ratio` is encoded bytes divided by raw RGBA bytes. WebP encode timing
 includes the FFmpeg process invocation, so it is an end-to-end reference and
-not a direct comparison of the AVIF encoder's in-process core timing. Use an
-FFmpeg executable path as the fourth argument when it is not available on
-`PATH`.
+not a direct comparison of the AVIF encoder's in-process core timing. The
+libavif timing similarly includes the `avifenc` process invocation. The
+libavif row uses `--yuv 420`, `--jobs all`, and matching `--qcolor`/`--qalpha`.
+Use executable paths for FFmpeg and libavif as the fourth and fifth arguments
+when they are not available on `PATH`.
