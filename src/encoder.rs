@@ -412,9 +412,12 @@ fn encode_planes(
 }
 
 fn apply_compression_defaults(config: &mut Rav1eEncoderConfig, options: &EncoderOptions) {
-    // libavif's speed scale still permits rate-distortion transform search at
-    // its faster presets. Keep the compression-oriented rav1e settings on all
-    // presets unless the caller explicitly selects the backend alternatives.
+    // libavif's speed scale still permits rate-distortion transform search and
+    // pixel-domain distortion at its faster presets. Keep the
+    // compression-oriented rav1e settings on all presets unless the caller
+    // explicitly selects the backend alternatives. Bottom-up partition
+    // decisions are also consistently better for still-image rate/distortion
+    // on the libavif comparison corpus.
     let has_rdo_setting = options
         .advanced
         .keys()
@@ -423,11 +426,36 @@ fn apply_compression_defaults(config: &mut Rav1eEncoderConfig, options: &Encoder
         .advanced
         .keys()
         .any(|key| matches!(key.as_str(), "reduced-tx-set" | "reduced_tx_set"));
+    let has_tx_distortion_setting = options.advanced.keys().any(|key| {
+        matches!(
+            key.as_str(),
+            "tx-domain-distortion" | "tx_domain_distortion"
+        )
+    });
+    let has_tx_rate_setting = options
+        .advanced
+        .keys()
+        .any(|key| matches!(key.as_str(), "tx-domain-rate" | "tx_domain_rate"));
+    let has_bottomup_setting = options
+        .advanced
+        .keys()
+        .any(|key| matches!(key.as_str(), "encode-bottomup" | "encode_bottomup"));
     if !has_rdo_setting {
         config.speed_settings.transform.rdo_tx_decision = true;
     }
     if !has_reduced_tx_setting {
         config.speed_settings.transform.reduced_tx_set = false;
+    }
+    // rav1e's temporal-RDO path uses pixel-domain distortion. This is the
+    // more compression-oriented choice for still images, and also matches
+    // the libavif rate-distortion path used by the comparison benchmark.
+    // Keep rav1e's default when tx-domain-rate is explicitly requested
+    // because that backend option is not valid together with temporal RDO.
+    if !has_tx_distortion_setting && !has_tx_rate_setting {
+        config.speed_settings.transform.tx_domain_distortion = false;
+    }
+    if !has_bottomup_setting {
+        config.speed_settings.partition.encode_bottomup = true;
     }
 }
 
@@ -1540,6 +1568,13 @@ fn apply_advanced(
             }
         }
     }
+    if config.speed_settings.transform.tx_domain_rate
+        && !config.speed_settings.transform.tx_domain_distortion
+    {
+        return Err(EncoderError::InvalidParam(
+            "tx-domain-rate cannot be combined with tx-domain-distortion=false".to_string(),
+        ));
+    }
     Ok(())
 }
 
@@ -1652,9 +1687,10 @@ fn scale_u16(value: u16, max: u32) -> u32 {
 
 #[cfg(test)]
 mod tests {
-    use super::{apply_compression_defaults, quality_to_quantizer};
+    use super::{apply_advanced, apply_compression_defaults, quality_to_quantizer};
     use crate::EncoderOptions;
     use crate::compat::DataMap;
+    use crate::compat::Metadata;
     use rav1e::prelude::EncoderConfig as Rav1eEncoderConfig;
 
     #[test]
@@ -1689,6 +1725,8 @@ mod tests {
         apply_compression_defaults(&mut config, &options);
         assert!(config.speed_settings.transform.rdo_tx_decision);
         assert!(!config.speed_settings.transform.reduced_tx_set);
+        assert!(!config.speed_settings.transform.tx_domain_distortion);
+        assert!(config.speed_settings.partition.encode_bottomup);
 
         let options = EncoderOptions {
             speed: 10,
@@ -1698,6 +1736,8 @@ mod tests {
         apply_compression_defaults(&mut config, &options);
         assert!(config.speed_settings.transform.rdo_tx_decision);
         assert!(!config.speed_settings.transform.reduced_tx_set);
+        assert!(!config.speed_settings.transform.tx_domain_distortion);
+        assert!(config.speed_settings.partition.encode_bottomup);
 
         let mut options = EncoderOptions::default();
         options.advanced.insert(
@@ -1712,5 +1752,21 @@ mod tests {
         apply_compression_defaults(&mut config, &options);
         assert!(!config.speed_settings.transform.rdo_tx_decision);
         assert!(config.speed_settings.transform.reduced_tx_set);
+    }
+
+    #[test]
+    fn tx_domain_rate_rejects_the_temporal_rdo_combination() {
+        let advanced = Metadata::from([
+            (
+                "tx-domain-rate".to_string(),
+                DataMap::Ascii("true".to_string()),
+            ),
+            (
+                "tx-domain-distortion".to_string(),
+                DataMap::Ascii("false".to_string()),
+            ),
+        ]);
+        let mut config = Rav1eEncoderConfig::with_speed_preset(6);
+        assert!(apply_advanced(&mut config, &advanced).is_err());
     }
 }

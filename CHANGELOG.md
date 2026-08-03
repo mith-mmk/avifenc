@@ -6,6 +6,9 @@
 - Added compatible RGBA, native-plane, metadata, and callback APIs.
 - Added 8-, 10-, and 12-bit 4:0:0, 4:2:0, 4:2:2, and 4:4:4 encoding.
 - Added AVIF auxiliary alpha item output and `wml2` integration.
+- Improved lossy still-image rate/distortion defaults with pixel-domain
+  transform decisions and bottom-up partition search; added validation for an
+  incompatible rav1e transform-option combination.
 - Added a private Pure Rust lossless AV1 intra backend for 8/10/12-bit
   4:0:0/4:2:0/4:2:2/4:4:4 native planes, including FFmpeg bit-exact
   verification for subsampled planes, RGBA16 scaling, and an auxiliary alpha
