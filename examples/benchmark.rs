@@ -207,6 +207,15 @@ fn benchmark_cases() -> Vec<BenchmarkCase> {
         options: q60_speed6,
     });
 
+    let q90_speed6 = EncoderOptions {
+        quality: 90,
+        quality_alpha: 90,
+        ..EncoderOptions::default()
+    };
+    cases.push(BenchmarkCase {
+        name: "q90-s6",
+        options: q90_speed6,
+    });
     let q60_speed6_psnr = EncoderOptions {
         quality: 60,
         quality_alpha: 60,
@@ -252,6 +261,47 @@ fn benchmark_cases() -> Vec<BenchmarkCase> {
     cases.push(BenchmarkCase {
         name: "q90-s10-rdo",
         options: q90_speed10_rdo,
+    });
+    let q90_speed10_rdo_psnr = EncoderOptions {
+        quality: 90,
+        quality_alpha: 90,
+        speed: 10,
+        advanced: HashMap::from([
+            (
+                "rdo_tx_decision".to_string(),
+                DataMap::Ascii("true".to_string()),
+            ),
+            (
+                "reduced_tx_set".to_string(),
+                DataMap::Ascii("false".to_string()),
+            ),
+            ("tune".to_string(), DataMap::Ascii("psnr".to_string())),
+        ]),
+        ..EncoderOptions::default()
+    };
+    cases.push(BenchmarkCase {
+        name: "q90-s10-rdo-psnr",
+        options: q90_speed10_rdo_psnr,
+    });
+    let q90_speed9_rdo = EncoderOptions {
+        quality: 90,
+        quality_alpha: 90,
+        speed: 9,
+        advanced: HashMap::from([
+            (
+                "rdo_tx_decision".to_string(),
+                DataMap::Ascii("true".to_string()),
+            ),
+            (
+                "reduced_tx_set".to_string(),
+                DataMap::Ascii("false".to_string()),
+            ),
+        ]),
+        ..EncoderOptions::default()
+    };
+    cases.push(BenchmarkCase {
+        name: "q90-s9-rdo",
+        options: q90_speed9_rdo,
     });
     cases
 }

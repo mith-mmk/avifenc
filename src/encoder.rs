@@ -412,9 +412,9 @@ fn encode_planes(
 }
 
 fn apply_compression_defaults(config: &mut Rav1eEncoderConfig, options: &EncoderOptions) {
-    if options.speed > 6 {
-        return;
-    }
+    // libavif's speed scale still permits rate-distortion transform search at
+    // its faster presets. Keep the compression-oriented rav1e settings on all
+    // presets unless the caller explicitly selects the backend alternatives.
     let has_rdo_setting = options
         .advanced
         .keys()
@@ -1685,6 +1685,15 @@ mod tests {
     #[test]
     fn compression_defaults_can_be_overridden_by_advanced_options() {
         let options = EncoderOptions::default();
+        let mut config = Rav1eEncoderConfig::with_speed_preset(options.speed);
+        apply_compression_defaults(&mut config, &options);
+        assert!(config.speed_settings.transform.rdo_tx_decision);
+        assert!(!config.speed_settings.transform.reduced_tx_set);
+
+        let options = EncoderOptions {
+            speed: 10,
+            ..EncoderOptions::default()
+        };
         let mut config = Rav1eEncoderConfig::with_speed_preset(options.speed);
         apply_compression_defaults(&mut config, &options);
         assert!(config.speed_settings.transform.rdo_tx_decision);
