@@ -432,10 +432,14 @@ fn apply_compression_defaults(config: &mut Rav1eEncoderConfig, options: &Encoder
             "tx-domain-distortion" | "tx_domain_distortion"
         )
     });
-    let has_tx_rate_setting = options
-        .advanced
-        .keys()
-        .any(|key| matches!(key.as_str(), "tx-domain-rate" | "tx_domain_rate"));
+    let tx_rate_enabled = options.advanced.iter().any(|(key, value)| {
+        matches!(key.as_str(), "tx-domain-rate" | "tx_domain_rate")
+            && match value {
+                DataMap::UInt(value) => *value != 0,
+                DataMap::Ascii(value) => value.eq_ignore_ascii_case("true"),
+                _ => false,
+            }
+    });
     let has_bottomup_setting = options
         .advanced
         .keys()
@@ -451,7 +455,7 @@ fn apply_compression_defaults(config: &mut Rav1eEncoderConfig, options: &Encoder
     // the libavif rate-distortion path used by the comparison benchmark.
     // Keep rav1e's default when tx-domain-rate is explicitly requested
     // because that backend option is not valid together with temporal RDO.
-    if !has_tx_distortion_setting && !has_tx_rate_setting {
+    if !has_tx_distortion_setting && !tx_rate_enabled {
         config.speed_settings.transform.tx_domain_distortion = false;
     }
     if !has_bottomup_setting {
@@ -1768,5 +1772,19 @@ mod tests {
         ]);
         let mut config = Rav1eEncoderConfig::with_speed_preset(6);
         assert!(apply_advanced(&mut config, &advanced).is_err());
+    }
+
+    #[test]
+    fn disabled_tx_domain_rate_keeps_the_compression_default() {
+        let options = EncoderOptions {
+            advanced: Metadata::from([(
+                "tx-domain-rate".to_string(),
+                DataMap::Ascii("false".to_string()),
+            )]),
+            ..EncoderOptions::default()
+        };
+        let mut config = Rav1eEncoderConfig::with_speed_preset(options.speed);
+        apply_compression_defaults(&mut config, &options);
+        assert!(!config.speed_settings.transform.tx_domain_distortion);
     }
 }
