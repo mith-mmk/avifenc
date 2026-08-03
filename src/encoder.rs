@@ -1,7 +1,7 @@
 use rav1e::prelude::{
     ChromaSampling, ColorDescription, ColorPrimaries, Config, EncoderConfig as Rav1eEncoderConfig,
-    EncoderStatus, MatrixCoefficients, PixelRange, Rational, SegmentationLevel,
-    TransferCharacteristics, Tune,
+    EncoderStatus, MatrixCoefficients, PixelRange, PredictionModesSetting, Rational,
+    SegmentationLevel, TransferCharacteristics, Tune,
 };
 
 use crate::compat::{DataMap, EncodeOptions, EncoderOptions, Metadata, PickOptions};
@@ -306,6 +306,31 @@ fn encode_planes(
     bit_depth: u8,
     options: &EncoderOptions,
 ) -> Result<EncodedFrame, EncoderError> {
+    let base =
+        encode_planes_with_prediction(width, height, planes, sampling, bit_depth, options, false)?;
+    if !should_try_complete_keyframe_search(options) {
+        return Ok(base);
+    }
+    let complete =
+        encode_planes_with_prediction(width, height, planes, sampling, bit_depth, options, true)?;
+    if complete.sequence_header.len() + complete.frame_payload.len()
+        < base.sequence_header.len() + base.frame_payload.len()
+    {
+        Ok(complete)
+    } else {
+        Ok(base)
+    }
+}
+
+fn encode_planes_with_prediction(
+    width: usize,
+    height: usize,
+    planes: &[PlaneInput<'_>],
+    sampling: Sampling,
+    bit_depth: u8,
+    options: &EncoderOptions,
+    complete_keyframe_search: bool,
+) -> Result<EncodedFrame, EncoderError> {
     let chroma_sampling = match sampling {
         Sampling::Cs400 => ChromaSampling::Cs400,
         Sampling::Cs420 => ChromaSampling::Cs420,
@@ -366,6 +391,10 @@ fn encode_planes(
     config.tile_cols = 1usize << options.tile_cols_log2;
     config.tile_rows = 1usize << options.tile_rows_log2;
     apply_compression_defaults(&mut config, options);
+    if complete_keyframe_search {
+        config.speed_settings.prediction.prediction_modes =
+            PredictionModesSetting::ComplexKeyframes;
+    }
     apply_advanced(&mut config, &options.advanced)?;
 
     let config = Config::new()
@@ -463,6 +492,27 @@ fn apply_compression_defaults(config: &mut Rav1eEncoderConfig, options: &Encoder
     if !has_bottomup_setting {
         config.speed_settings.partition.encode_bottomup = true;
     }
+}
+
+fn should_try_complete_keyframe_search(options: &EncoderOptions) -> bool {
+    if options.speed < 7 {
+        return false;
+    }
+    for (key, value) in &options.advanced {
+        if matches!(key.as_str(), "rdo-tx-decision" | "rdo_tx_decision")
+            && let Ok(enabled) = metadata_bool(value, key)
+            && !enabled
+        {
+            return false;
+        }
+        if matches!(key.as_str(), "reduced-tx-set" | "reduced_tx_set")
+            && let Ok(enabled) = metadata_bool(value, key)
+            && enabled
+        {
+            return false;
+        }
+    }
+    true
 }
 
 fn validate_rgba8(image: &ImageBuffer) -> Result<(), EncoderError> {
@@ -1693,7 +1743,10 @@ fn scale_u16(value: u16, max: u32) -> u32 {
 
 #[cfg(test)]
 mod tests {
-    use super::{apply_advanced, apply_compression_defaults, quality_to_quantizer};
+    use super::{
+        apply_advanced, apply_compression_defaults, quality_to_quantizer,
+        should_try_complete_keyframe_search,
+    };
     use crate::EncoderOptions;
     use crate::compat::DataMap;
     use crate::compat::Metadata;
@@ -1760,6 +1813,21 @@ mod tests {
         apply_compression_defaults(&mut config, &options);
         assert!(!config.speed_settings.transform.rdo_tx_decision);
         assert!(config.speed_settings.transform.reduced_tx_set);
+    }
+
+    #[test]
+    fn complete_keyframe_search_is_adaptive_and_respects_fast_overrides() {
+        let mut options = EncoderOptions::default();
+        assert!(!should_try_complete_keyframe_search(&options));
+
+        options.speed = 10;
+        assert!(should_try_complete_keyframe_search(&options));
+
+        options.advanced.insert(
+            "rdo_tx_decision".to_string(),
+            DataMap::Ascii("false".to_string()),
+        );
+        assert!(!should_try_complete_keyframe_search(&options));
     }
 
     #[test]

@@ -56,9 +56,10 @@ includes the FFmpeg process invocation, so it is an end-to-end reference and
 not a direct comparison of the AVIF encoder's in-process core timing. The
 libavif timing similarly includes the `avifenc` process invocation. The
 libavif row uses `--yuv 420`, `--jobs all`, and matching `--qcolor`/`--qalpha`.
-The default path enables full transform RDO, full segmentation search,
-pixel-domain distortion, and bottom-up partition search for compression at
-every speed;
+The default path enables full transform RDO and full segmentation search,
+then adaptively compares the preset's keyframe intra-mode search with the
+complete keyframe search on faster presets. It also uses pixel-domain
+distortion and bottom-up partition search for compression at every speed;
 the explicit `rdo_tx_decision=false,reduced_tx_set=true` metadata combination
 restores the faster rav1e transform preset. The benchmark also includes
 `q60-s6-fast`, `q90-s10-rdo`, `q90-s10-rdo-psnr`, and `q90-s9-rdo` to separate
