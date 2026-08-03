@@ -56,9 +56,13 @@ includes the FFmpeg process invocation, so it is an end-to-end reference and
 not a direct comparison of the AVIF encoder's in-process core timing. The
 libavif timing similarly includes the `avifenc` process invocation. The
 libavif row uses `--yuv 420`, `--jobs all`, and matching `--qcolor`/`--qalpha`.
-The AVIF rows also include `q60-s6-rdo`, which enables full transform RDO as a
-compression-oriented rav1e comparison. Grayscale RGBA input is encoded as a
-single YUV400 plane automatically; this avoids three-channel coding for
-monochrome images while preserving the AVIF container contract.
+The default `speed <= 6` path enables full transform RDO for compression; the
+benchmark also includes `q60-s6-fast` with the faster rav1e transform preset and
+`q90-s10-rdo` to measure the compression-oriented transform settings at the
+fast preset. The latter separates rav1e preset differences from the public
+quality mapping when comparing against libavif.
+Grayscale RGBA input is encoded as a single YUV400 plane automatically; this
+avoids three-channel coding for monochrome images while preserving the AVIF
+container contract.
 Use executable paths for FFmpeg and libavif as the fourth and fifth arguments
 when they are not available on `PATH`.

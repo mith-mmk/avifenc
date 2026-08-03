@@ -364,6 +364,7 @@ fn encode_planes(
     config.set_key_frame_interval(1, 1);
     config.tile_cols = 1usize << options.tile_cols_log2;
     config.tile_rows = 1usize << options.tile_rows_log2;
+    apply_compression_defaults(&mut config, options);
     apply_advanced(&mut config, &options.advanced)?;
 
     let config = Config::new()
@@ -408,6 +409,26 @@ fn encode_planes(
         frame_payload,
         pixel_channels: planes.len() as u8,
     })
+}
+
+fn apply_compression_defaults(config: &mut Rav1eEncoderConfig, options: &EncoderOptions) {
+    if options.speed > 6 {
+        return;
+    }
+    let has_rdo_setting = options
+        .advanced
+        .keys()
+        .any(|key| matches!(key.as_str(), "rdo-tx-decision" | "rdo_tx_decision"));
+    let has_reduced_tx_setting = options
+        .advanced
+        .keys()
+        .any(|key| matches!(key.as_str(), "reduced-tx-set" | "reduced_tx_set"));
+    if !has_rdo_setting {
+        config.speed_settings.transform.rdo_tx_decision = true;
+    }
+    if !has_reduced_tx_setting {
+        config.speed_settings.transform.reduced_tx_set = false;
+    }
 }
 
 fn validate_rgba8(image: &ImageBuffer) -> Result<(), EncoderError> {
@@ -1129,22 +1150,12 @@ fn effective_image_options(
 }
 
 fn quality_to_quantizer(quality: u8) -> usize {
-    // Keep the public quality scale compatible with libavif's current
-    // tune=iq mapping. A linear mapping over-allocates bits in the middle of
-    // the quality range, which is especially visible for still images.
+    // libavif maps its public 0..=100 quality scale to the codec's quantizer
+    // range. rav1e uses the full 0..=255 QP range, so keep the same mapping as
+    // libavif's rav1e backend instead of treating the public quality as a
+    // rav1e-native quantizer.
     let quality = u16::from(quality);
-    let quantizer = if quality <= 6 {
-        63 - quality / 3
-    } else if quality <= 28 {
-        61 - (quality - 7).div_ceil(2)
-    } else if quality <= 53 {
-        50 - ((quality - 29) * 3 + 2) / 5
-    } else if quality <= 99 {
-        35 - ((quality - 54) * 3 + 2) / 4
-    } else {
-        0
-    };
-    quantizer as usize
+    ((100 - quality) * 255 + 50) as usize / 100
 }
 
 fn pixel_range(options: &EncoderOptions) -> PixelRange {
@@ -1641,22 +1652,25 @@ fn scale_u16(value: u16, max: u32) -> u32 {
 
 #[cfg(test)]
 mod tests {
-    use super::quality_to_quantizer;
+    use super::{apply_compression_defaults, quality_to_quantizer};
+    use crate::EncoderOptions;
+    use crate::compat::DataMap;
+    use rav1e::prelude::EncoderConfig as Rav1eEncoderConfig;
 
     #[test]
-    fn quality_mapping_matches_libavif_tune_iq_boundaries() {
+    fn quality_mapping_matches_libavif_rav1e_backend() {
         let expected = [
-            (0, 63),
-            (6, 61),
-            (7, 61),
-            (28, 50),
-            (29, 50),
-            (53, 36),
-            (54, 35),
-            (60, 30),
-            (75, 19),
-            (90, 8),
-            (99, 1),
+            (0, 255),
+            (6, 240),
+            (7, 237),
+            (28, 184),
+            (29, 181),
+            (53, 120),
+            (54, 117),
+            (60, 102),
+            (75, 64),
+            (90, 26),
+            (99, 3),
             (100, 0),
         ];
         for (quality, quantizer) in expected {
@@ -1666,5 +1680,28 @@ mod tests {
                 "quality={quality}"
             );
         }
+    }
+
+    #[test]
+    fn compression_defaults_can_be_overridden_by_advanced_options() {
+        let options = EncoderOptions::default();
+        let mut config = Rav1eEncoderConfig::with_speed_preset(options.speed);
+        apply_compression_defaults(&mut config, &options);
+        assert!(config.speed_settings.transform.rdo_tx_decision);
+        assert!(!config.speed_settings.transform.reduced_tx_set);
+
+        let mut options = EncoderOptions::default();
+        options.advanced.insert(
+            "rdo_tx_decision".to_string(),
+            DataMap::Ascii("false".to_string()),
+        );
+        options.advanced.insert(
+            "reduced_tx_set".to_string(),
+            DataMap::Ascii("true".to_string()),
+        );
+        let mut config = Rav1eEncoderConfig::with_speed_preset(options.speed);
+        apply_compression_defaults(&mut config, &options);
+        assert!(!config.speed_settings.transform.rdo_tx_decision);
+        assert!(config.speed_settings.transform.reduced_tx_set);
     }
 }

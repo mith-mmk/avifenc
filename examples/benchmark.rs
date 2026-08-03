@@ -217,7 +217,26 @@ fn benchmark_cases() -> Vec<BenchmarkCase> {
         name: "q60-s6-psnr",
         options: q60_speed6_psnr,
     });
-    let q60_speed6_rdo = EncoderOptions {
+    let q60_speed6_fast = EncoderOptions {
+        advanced: HashMap::from([
+            (
+                "rdo_tx_decision".to_string(),
+                DataMap::Ascii("false".to_string()),
+            ),
+            (
+                "reduced_tx_set".to_string(),
+                DataMap::Ascii("true".to_string()),
+            ),
+        ]),
+        ..EncoderOptions::default()
+    };
+    cases.push(BenchmarkCase {
+        name: "q60-s6-fast",
+        options: q60_speed6_fast,
+    });
+    let q90_speed10_rdo = EncoderOptions {
+        quality: 90,
+        speed: 10,
         advanced: HashMap::from([
             (
                 "rdo_tx_decision".to_string(),
@@ -231,8 +250,8 @@ fn benchmark_cases() -> Vec<BenchmarkCase> {
         ..EncoderOptions::default()
     };
     cases.push(BenchmarkCase {
-        name: "q60-s6-rdo",
-        options: q60_speed6_rdo,
+        name: "q90-s10-rdo",
+        options: q90_speed10_rdo,
     });
     cases
 }
