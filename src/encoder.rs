@@ -84,32 +84,52 @@ pub fn encode_bytes(
             alpha_lossless_requested(options),
         );
     }
-    let (y, u, v, alpha) = rgba_to_yuv420(image);
-    let planes = [
-        PlaneInput {
-            samples: &y,
+    let grayscale = rgba8_is_grayscale(image);
+    let (primary, alpha, channels) = if grayscale {
+        let (gray, alpha) = rgba_to_gray(image);
+        let planes = [PlaneInput {
+            samples: &gray,
             width: image.width,
             height: image.height,
-        },
-        PlaneInput {
-            samples: &u,
-            width: chroma_width(image.width),
-            height: chroma_height(image.height),
-        },
-        PlaneInput {
-            samples: &v,
-            width: chroma_width(image.width),
-            height: chroma_height(image.height),
-        },
-    ];
-    let primary = encode_planes(
-        image.width,
-        image.height,
-        &planes,
-        Sampling::Cs420,
-        8,
-        options,
-    )?;
+        }];
+        let primary = encode_planes(
+            image.width,
+            image.height,
+            &planes,
+            Sampling::Cs400,
+            8,
+            options,
+        )?;
+        (primary, alpha, 1)
+    } else {
+        let (y, u, v, alpha) = rgba_to_yuv420(image);
+        let planes = [
+            PlaneInput {
+                samples: &y,
+                width: image.width,
+                height: image.height,
+            },
+            PlaneInput {
+                samples: &u,
+                width: chroma_width(image.width),
+                height: chroma_height(image.height),
+            },
+            PlaneInput {
+                samples: &v,
+                width: chroma_width(image.width),
+                height: chroma_height(image.height),
+            },
+        ];
+        let primary = encode_planes(
+            image.width,
+            image.height,
+            &planes,
+            Sampling::Cs420,
+            8,
+            options,
+        )?;
+        (primary, alpha, 3)
+    };
     let mut alpha_options = options.clone();
     alpha_options.quality = options.quality_alpha;
     alpha_options.color_information = None;
@@ -132,7 +152,7 @@ pub fn encode_bytes(
         Some(result) => Some(result?),
         None => None,
     };
-    let effective = effective_options(options, 3, 8);
+    let effective = effective_image_options(options, channels, 8);
     write_avif(
         image.width,
         image.height,
@@ -199,32 +219,52 @@ pub fn encode_rgba16_bytes(
             alpha_lossless_requested(options),
         );
     }
-    let (y, u, v, alpha) = rgba16_to_yuv420(image, bit_depth);
-    let planes = [
-        PlaneInput {
-            samples: &y,
+    let grayscale = rgba16_is_grayscale(image);
+    let (primary, alpha, channels) = if grayscale {
+        let (gray, alpha) = rgba16_to_gray(image, bit_depth);
+        let planes = [PlaneInput {
+            samples: &gray,
             width: image.width,
             height: image.height,
-        },
-        PlaneInput {
-            samples: &u,
-            width: chroma_width(image.width),
-            height: chroma_height(image.height),
-        },
-        PlaneInput {
-            samples: &v,
-            width: chroma_width(image.width),
-            height: chroma_height(image.height),
-        },
-    ];
-    let primary = encode_planes(
-        image.width,
-        image.height,
-        &planes,
-        Sampling::Cs420,
-        bit_depth,
-        options,
-    )?;
+        }];
+        let primary = encode_planes(
+            image.width,
+            image.height,
+            &planes,
+            Sampling::Cs400,
+            bit_depth,
+            options,
+        )?;
+        (primary, alpha, 1)
+    } else {
+        let (y, u, v, alpha) = rgba16_to_yuv420(image, bit_depth);
+        let planes = [
+            PlaneInput {
+                samples: &y,
+                width: image.width,
+                height: image.height,
+            },
+            PlaneInput {
+                samples: &u,
+                width: chroma_width(image.width),
+                height: chroma_height(image.height),
+            },
+            PlaneInput {
+                samples: &v,
+                width: chroma_width(image.width),
+                height: chroma_height(image.height),
+            },
+        ];
+        let primary = encode_planes(
+            image.width,
+            image.height,
+            &planes,
+            Sampling::Cs420,
+            bit_depth,
+            options,
+        )?;
+        (primary, alpha, 3)
+    };
     let mut alpha_options = options.clone();
     alpha_options.quality = options.quality_alpha;
     alpha_options.color_information = None;
@@ -247,7 +287,7 @@ pub fn encode_rgba16_bytes(
         Some(result) => Some(result?),
         None => None,
     };
-    let effective = effective_options(options, 3, bit_depth);
+    let effective = effective_image_options(options, channels, bit_depth);
     write_avif(
         image.width,
         image.height,
@@ -524,8 +564,9 @@ fn encode_rgba8_with_lossless_items(
     alpha_lossless: bool,
 ) -> Result<Vec<u8>, EncoderError> {
     let has_alpha = image.rgba.chunks_exact(4).any(|pixel| pixel[3] != u8::MAX);
+    let grayscale = rgba8_is_grayscale(image);
     if color_lossless {
-        validate_lossless_options(options, 3, 8, "RGBA8 color")?;
+        validate_lossless_options(options, if grayscale { 1 } else { 3 }, 8, "RGBA8 color")?;
     }
 
     let width = u32::try_from(image.width)
@@ -533,39 +574,69 @@ fn encode_rgba8_with_lossless_items(
     let height = u32::try_from(image.height)
         .map_err(|_| EncoderError::InvalidParam("image height exceeds u32".to_string()))?;
     let primary = if color_lossless {
-        let rgb = image
-            .rgba
-            .chunks_exact(4)
-            .flat_map(|pixel| pixel[..3].iter().copied())
-            .collect::<Vec<_>>();
-        encode_gamut_lossless_frame(width, height, &rgb)?
+        if grayscale {
+            let gray = image
+                .rgba
+                .chunks_exact(4)
+                .map(|pixel| u16::from(pixel[0]))
+                .collect::<Vec<_>>();
+            encode_lossless_gray_samples(width, height, &gray, 8)?
+        } else {
+            let rgb = image
+                .rgba
+                .chunks_exact(4)
+                .flat_map(|pixel| pixel[..3].iter().copied())
+                .collect::<Vec<_>>();
+            encode_gamut_lossless_frame(width, height, &rgb)?
+        }
     } else {
-        let (y, u, v, _) = rgba_to_yuv420(image);
-        let planes = [
-            PlaneInput {
-                samples: &y,
+        if grayscale {
+            let gray = image
+                .rgba
+                .chunks_exact(4)
+                .map(|pixel| u16::from(pixel[0]))
+                .collect::<Vec<_>>();
+            let planes = [PlaneInput {
+                samples: &gray,
                 width: image.width,
                 height: image.height,
-            },
-            PlaneInput {
-                samples: &u,
-                width: chroma_width(image.width),
-                height: chroma_height(image.height),
-            },
-            PlaneInput {
-                samples: &v,
-                width: chroma_width(image.width),
-                height: chroma_height(image.height),
-            },
-        ];
-        encode_planes(
-            image.width,
-            image.height,
-            &planes,
-            Sampling::Cs420,
-            8,
-            options,
-        )?
+            }];
+            encode_planes(
+                image.width,
+                image.height,
+                &planes,
+                Sampling::Cs400,
+                8,
+                options,
+            )?
+        } else {
+            let (y, u, v, _) = rgba_to_yuv420(image);
+            let planes = [
+                PlaneInput {
+                    samples: &y,
+                    width: image.width,
+                    height: image.height,
+                },
+                PlaneInput {
+                    samples: &u,
+                    width: chroma_width(image.width),
+                    height: chroma_height(image.height),
+                },
+                PlaneInput {
+                    samples: &v,
+                    width: chroma_width(image.width),
+                    height: chroma_height(image.height),
+                },
+            ];
+            encode_planes(
+                image.width,
+                image.height,
+                &planes,
+                Sampling::Cs420,
+                8,
+                options,
+            )?
+        }
     };
     let alpha = if has_alpha {
         let alpha_samples = image
@@ -616,7 +687,7 @@ fn encode_rgba8_with_lossless_items(
     } else {
         None
     };
-    let mut effective = effective_options(options, 3, 8);
+    let mut effective = effective_image_options(options, if grayscale { 1 } else { 3 }, 8);
     if color_lossless {
         effective.color_information = Some(lossless_color_information());
     }
@@ -650,42 +721,76 @@ fn encode_rgba16_with_lossless_items(
         has_alpha |= alpha != max;
     }
 
+    let grayscale = rgba16_is_grayscale(image);
     if color_lossless {
-        validate_lossless_options(options, 3, bit_depth, "RGBA16 color")?;
+        validate_lossless_options(
+            options,
+            if grayscale { 1 } else { 3 },
+            bit_depth,
+            "RGBA16 color",
+        )?;
     }
     let width = u32::try_from(image.width)
         .map_err(|_| EncoderError::InvalidParam("image width exceeds u32".to_string()))?;
     let height = u32::try_from(image.height)
         .map_err(|_| EncoderError::InvalidParam("image height exceeds u32".to_string()))?;
     let primary = if color_lossless {
-        encode_gamut_lossless_samples(width, height, &rgb, bit_depth)?
+        if grayscale {
+            let gray = rgb
+                .chunks_exact(3)
+                .map(|pixel| pixel[0])
+                .collect::<Vec<_>>();
+            encode_lossless_gray_samples(width, height, &gray, bit_depth)?
+        } else {
+            encode_gamut_lossless_samples(width, height, &rgb, bit_depth)?
+        }
     } else {
-        let (y, u, v, _) = rgba16_to_yuv420(image, bit_depth);
-        let planes = [
-            PlaneInput {
-                samples: &y,
+        if grayscale {
+            let gray = rgb
+                .chunks_exact(3)
+                .map(|pixel| pixel[0])
+                .collect::<Vec<_>>();
+            let planes = [PlaneInput {
+                samples: &gray,
                 width: image.width,
                 height: image.height,
-            },
-            PlaneInput {
-                samples: &u,
-                width: chroma_width(image.width),
-                height: chroma_height(image.height),
-            },
-            PlaneInput {
-                samples: &v,
-                width: chroma_width(image.width),
-                height: chroma_height(image.height),
-            },
-        ];
-        encode_planes(
-            image.width,
-            image.height,
-            &planes,
-            Sampling::Cs420,
-            bit_depth,
-            options,
-        )?
+            }];
+            encode_planes(
+                image.width,
+                image.height,
+                &planes,
+                Sampling::Cs400,
+                bit_depth,
+                options,
+            )?
+        } else {
+            let (y, u, v, _) = rgba16_to_yuv420(image, bit_depth);
+            let planes = [
+                PlaneInput {
+                    samples: &y,
+                    width: image.width,
+                    height: image.height,
+                },
+                PlaneInput {
+                    samples: &u,
+                    width: chroma_width(image.width),
+                    height: chroma_height(image.height),
+                },
+                PlaneInput {
+                    samples: &v,
+                    width: chroma_width(image.width),
+                    height: chroma_height(image.height),
+                },
+            ];
+            encode_planes(
+                image.width,
+                image.height,
+                &planes,
+                Sampling::Cs420,
+                bit_depth,
+                options,
+            )?
+        }
     };
     let alpha = if has_alpha {
         if alpha_lossless {
@@ -731,7 +836,7 @@ fn encode_rgba16_with_lossless_items(
     } else {
         None
     };
-    let mut effective = effective_options(options, 3, bit_depth);
+    let mut effective = effective_image_options(options, if grayscale { 1 } else { 3 }, bit_depth);
     if color_lossless {
         effective.color_information = Some(lossless_color_information());
     }
@@ -1007,8 +1112,39 @@ fn effective_options(options: &EncoderOptions, channels: usize, bit_depth: u8) -
     effective
 }
 
+fn effective_image_options(
+    options: &EncoderOptions,
+    channels: usize,
+    bit_depth: u8,
+) -> EncoderOptions {
+    let mut effective = options.clone();
+    if channels == 1
+        && let Some(pixel_information) = effective.pixel_information.as_mut()
+        && pixel_information.bits_per_channel.len() == 3
+    {
+        pixel_information.bits_per_channel.truncate(1);
+        pixel_information.extended_channels = None;
+    }
+    effective_options(&effective, channels, bit_depth)
+}
+
 fn quality_to_quantizer(quality: u8) -> usize {
-    (((100u16.saturating_sub(quality as u16) * 63) / 100) as usize).max(1)
+    // Keep the public quality scale compatible with libavif's current
+    // tune=iq mapping. A linear mapping over-allocates bits in the middle of
+    // the quality range, which is especially visible for still images.
+    let quality = u16::from(quality);
+    let quantizer = if quality <= 6 {
+        63 - quality / 3
+    } else if quality <= 28 {
+        61 - (quality - 7).div_ceil(2)
+    } else if quality <= 53 {
+        50 - ((quality - 29) * 3 + 2) / 5
+    } else if quality <= 99 {
+        35 - ((quality - 54) * 3 + 2) / 4
+    } else {
+        0
+    };
+    quantizer as usize
 }
 
 fn pixel_range(options: &EncoderOptions) -> PixelRange {
@@ -1090,6 +1226,46 @@ fn matrix_coefficients(value: u16) -> MatrixCoefficients {
         14 => MatrixCoefficients::ICtCp,
         _ => MatrixCoefficients::Unspecified,
     }
+}
+
+fn rgba8_is_grayscale(image: &ImageBuffer) -> bool {
+    image
+        .rgba
+        .chunks_exact(4)
+        .all(|pixel| pixel[0] == pixel[1] && pixel[1] == pixel[2])
+}
+
+fn rgba16_is_grayscale(image: &Rgba16ImageBuffer) -> bool {
+    image
+        .rgba
+        .chunks_exact(4)
+        .all(|pixel| pixel[0] == pixel[1] && pixel[1] == pixel[2])
+}
+
+fn rgba_to_gray(image: &ImageBuffer) -> (Vec<u16>, Option<Vec<u16>>) {
+    let mut gray = Vec::with_capacity(image.width * image.height);
+    let mut alpha = Vec::with_capacity(image.width * image.height);
+    let mut has_alpha = false;
+    for pixel in image.rgba.chunks_exact(4) {
+        gray.push(u16::from(pixel[0]));
+        alpha.push(u16::from(pixel[3]));
+        has_alpha |= pixel[3] != u8::MAX;
+    }
+    (gray, has_alpha.then_some(alpha))
+}
+
+fn rgba16_to_gray(image: &Rgba16ImageBuffer, bit_depth: u8) -> (Vec<u16>, Option<Vec<u16>>) {
+    let max = (1u32 << u32::from(bit_depth)) - 1;
+    let mut gray = Vec::with_capacity(image.width * image.height);
+    let mut alpha = Vec::with_capacity(image.width * image.height);
+    let mut has_alpha = false;
+    for pixel in image.rgba.chunks_exact(4) {
+        gray.push(scale_u16(pixel[0], max) as u16);
+        let value = scale_u16(pixel[3], max) as u16;
+        alpha.push(value);
+        has_alpha |= value != max as u16;
+    }
+    (gray, has_alpha.then_some(alpha))
 }
 
 fn rgba_to_yuv420(image: &ImageBuffer) -> (Vec<u16>, Vec<u16>, Vec<u16>, Option<Vec<u16>>) {
@@ -1461,4 +1637,34 @@ fn rgb_to_yuv_u32(red: u32, green: u32, blue: u32, max: u32) -> (u32, u32, u32) 
 
 fn scale_u16(value: u16, max: u32) -> u32 {
     ((u32::from(value) * max + 32767) / 65535).min(max)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::quality_to_quantizer;
+
+    #[test]
+    fn quality_mapping_matches_libavif_tune_iq_boundaries() {
+        let expected = [
+            (0, 63),
+            (6, 61),
+            (7, 61),
+            (28, 50),
+            (29, 50),
+            (53, 36),
+            (54, 35),
+            (60, 30),
+            (75, 19),
+            (90, 8),
+            (99, 1),
+            (100, 0),
+        ];
+        for (quality, quantizer) in expected {
+            assert_eq!(
+                quality_to_quantizer(quality),
+                quantizer,
+                "quality={quality}"
+            );
+        }
+    }
 }

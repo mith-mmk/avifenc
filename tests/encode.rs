@@ -43,6 +43,29 @@ fn rgba_alpha_is_written_as_an_auxiliary_item() {
 }
 
 #[test]
+fn grayscale_rgba_uses_a_monochrome_primary_item() {
+    let rgba = [0u8, 32, 96, 255, 255, 128, 64, 16]
+        .into_iter()
+        .flat_map(|value| [value, value, value, u8::MAX])
+        .collect();
+    let image = ImageBuffer {
+        width: 4,
+        height: 2,
+        rgba,
+    };
+    let options = EncoderOptions {
+        lossless: true,
+        ..EncoderOptions::default()
+    };
+    let encoded = encode_bytes(&image, &options).unwrap();
+    let pixi = encoded
+        .windows(4)
+        .position(|window| window == b"pixi")
+        .expect("primary pixi box");
+    assert_eq!(encoded[pixi + 8], 1);
+}
+
+#[test]
 fn rgba_odd_dimensions_encode_without_chroma_padding_bias() {
     let image = ImageBuffer {
         width: 1,

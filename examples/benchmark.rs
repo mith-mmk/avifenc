@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::env;
 use std::error::Error;
 use std::fs;
@@ -5,7 +6,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::{Duration, Instant};
 
-use avifenc_rust::{EncoderOptions, ImageBuffer, encode_bytes};
+use avifenc_rust::{DataMap, EncoderOptions, ImageBuffer, encode_bytes};
 
 struct BenchmarkCase {
     name: &'static str,
@@ -205,6 +206,34 @@ fn benchmark_cases() -> Vec<BenchmarkCase> {
         name: "q60-s6",
         options: q60_speed6,
     });
+
+    let q60_speed6_psnr = EncoderOptions {
+        quality: 60,
+        quality_alpha: 60,
+        advanced: HashMap::from([("tune".to_string(), DataMap::Ascii("psnr".to_string()))]),
+        ..EncoderOptions::default()
+    };
+    cases.push(BenchmarkCase {
+        name: "q60-s6-psnr",
+        options: q60_speed6_psnr,
+    });
+    let q60_speed6_rdo = EncoderOptions {
+        advanced: HashMap::from([
+            (
+                "rdo_tx_decision".to_string(),
+                DataMap::Ascii("true".to_string()),
+            ),
+            (
+                "reduced_tx_set".to_string(),
+                DataMap::Ascii("false".to_string()),
+            ),
+        ]),
+        ..EncoderOptions::default()
+    };
+    cases.push(BenchmarkCase {
+        name: "q60-s6-rdo",
+        options: q60_speed6_rdo,
+    });
     cases
 }
 
@@ -272,6 +301,11 @@ fn libavif_benchmark_cases() -> Vec<LibavifBenchmarkCase> {
         LibavifBenchmarkCase {
             name: "q60-s6",
             quality: Some(60),
+            speed: 6,
+        },
+        LibavifBenchmarkCase {
+            name: "q90-s6",
+            quality: Some(90),
             speed: 6,
         },
     ]
