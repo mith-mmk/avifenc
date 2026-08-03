@@ -1,9 +1,10 @@
 //! The single-tile, all-intra, lossless encoder: superblock/partition iteration (§5.11.2/.4),
-//! DC intra prediction (§7.11.2.5), the forward 4×4 WHT (via `gamut-dsp`), and coefficient coding
+//! intra prediction (§7.11.2), the forward 4×4 WHT (via `gamut-dsp`), and coefficient coding
 //! with full context derivation (§5.11.39, §8.3.2).
 //!
-//! All coded blocks are square `DC_PRED` intra blocks; partitions are `PARTITION_NONE` except at
-//! the right/bottom frame edges, where the spec's forced splitting applies. The frame is coded on
+//! All coded blocks are square intra blocks using a small lossless DC/V/H
+//! search; partitions are `PARTITION_NONE` except at the right/bottom frame
+//! edges, where the spec's forced splitting applies. The frame is coded on
 //! the MI-unit grid (`mi_cols*4 × mi_rows*4`, i.e. dimensions rounded up to a multiple of 8); the
 //! out-of-frame padding is edge-replicated and cropped away on decode.
 
@@ -20,6 +21,11 @@ struct PaletteBlock {
 const NUM_BASE_LEVELS: i32 = 2;
 /// `NUM_BASE_LEVELS + COEFF_BASE_RANGE`, the golomb threshold (§5.11.39).
 const COEFF_BASE_PLUS_RANGE: i32 = 14;
+
+const DC_PRED: u8 = 0;
+const V_PRED: u8 = 1;
+const H_PRED: u8 = 2;
+const PAETH_PRED: u8 = 12;
 
 /// Encoder for the single tile that spans the whole frame.
 pub(crate) struct FrameEncoder<'a> {
@@ -43,6 +49,8 @@ pub(crate) struct FrameEncoder<'a> {
     mi_bsl: Vec<u8>,
     /// Whether the block covering each MI cell was coded with `skip = 1`.
     mi_skip: Vec<bool>,
+    /// Y intra mode of the block covering each MI cell.
+    mi_ymode: Vec<u8>,
     /// Palette size of the block covering each MI cell (zero for no palette).
     mi_palette_size: Vec<u8>,
     /// Sorted luma palette colours of the block covering each MI cell.
@@ -176,6 +184,7 @@ impl<'a> FrameEncoder<'a> {
                 .collect(),
             mi_bsl: vec![0; mi_cols * mi_rows],
             mi_skip: vec![false; mi_cols * mi_rows],
+            mi_ymode: vec![DC_PRED; mi_cols * mi_rows],
             mi_palette_size: vec![0; mi_cols * mi_rows],
             mi_palette_colors: vec![[0; 2]; mi_cols * mi_rows],
         }
@@ -264,13 +273,37 @@ impl<'a> FrameEncoder<'a> {
         let n4 = bw / 4;
         let bsl = n4.trailing_zeros() as u8;
         let palette = self.palette_block(r, c, bw);
-        let skip = palette.is_some() || self.block_is_skippable(r, c, bw);
+        let y_mode = palette
+            .as_ref()
+            .map_or_else(|| self.select_y_mode(r, c, bw), |_| DC_PRED);
+        let skip = palette.is_some() || self.block_is_skippable(r, c, bw, y_mode);
 
-        // intra_frame_mode_info: skip, then y_mode=DC_PRED (ctx [0][0]), uv_mode=DC_PRED.
+        // intra_frame_mode_info: skip, then the selected y_mode.  The mode
+        // context is derived from the already-coded above/left MI cells.
         let skip_ctx = self.skip_ctx(r, c);
         self.sym
             .encode_symbol(usize::from(skip), &cdf::SKIP[skip_ctx]);
-        self.sym.encode_symbol(0, &cdf::INTRA_FRAME_Y_MODE_DC_DC);
+        let above_mode = if r > 0 {
+            self.mi_ymode[(r - 1) * self.mi_cols + c]
+        } else {
+            DC_PRED
+        };
+        let left_mode = if c > 0 {
+            self.mi_ymode[r * self.mi_cols + c - 1]
+        } else {
+            DC_PRED
+        };
+        let above_context = intra_mode_context(above_mode);
+        let left_context = intra_mode_context(left_mode);
+        let y_mode_cdf = intra_frame_y_mode_cdf(above_context, left_context);
+        self.sym.encode_symbol(usize::from(y_mode), &y_mode_cdf);
+        if bw >= 8 {
+            if y_mode == V_PRED {
+                self.sym.encode_symbol(3, &cdf::ANGLE_DELTA_V);
+            } else if y_mode == H_PRED {
+                self.sym.encode_symbol(3, &cdf::ANGLE_DELTA_H);
+            }
+        }
         let chroma_reference = !self.monochrome && self.is_chroma_reference(r, c, bw);
         if chroma_reference {
             // In coded-lossless mode CFL is allowed when the subsampled chroma
@@ -278,15 +311,16 @@ impl<'a> FrameEncoder<'a> {
             let chroma_width = (bw >> self.subsampling_x).max(4);
             let chroma_height = (bw >> self.subsampling_y).max(4);
             let cfl_allowed = chroma_width == 4 && chroma_height == 4;
-            let uv: &[u16] = if cfl_allowed {
-                &cdf::UV_MODE_CFL_ALLOWED_DC
+            if cfl_allowed {
+                let uv = uv_mode_cfl_allowed_cdf(y_mode);
+                self.sym.encode_symbol(0, &uv);
             } else {
-                &cdf::UV_MODE_CFL_NOT_ALLOWED_DC
-            };
-            self.sym.encode_symbol(0, uv);
+                let uv = uv_mode_cfl_not_allowed_cdf(y_mode);
+                self.sym.encode_symbol(0, &uv);
+            }
         }
 
-        if bw >= 8 {
+        if bw >= 8 && y_mode == DC_PRED {
             let block_size_context = palette_block_size_context(bw);
             let palette_context = self.palette_context(r, c);
             let has_palette = palette.is_some();
@@ -315,6 +349,7 @@ impl<'a> FrameEncoder<'a> {
                 if rr < self.mi_rows && cc < self.mi_cols {
                     self.mi_bsl[rr * self.mi_cols + cc] = bsl;
                     self.mi_skip[rr * self.mi_cols + cc] = skip;
+                    self.mi_ymode[rr * self.mi_cols + cc] = y_mode;
                     self.mi_palette_size[rr * self.mi_cols + cc] = u8::from(palette.is_some()) * 2;
                     self.mi_palette_colors[rr * self.mi_cols + cc] =
                         palette.as_ref().map_or([0; 2], |value| value.colors);
@@ -328,10 +363,10 @@ impl<'a> FrameEncoder<'a> {
         }
 
         // residual(): decoder order is luma, then U/V only for chroma-reference blocks.
-        self.encode_plane_unit(0, r, c, bw);
+        self.encode_plane_unit(0, r, c, bw, y_mode);
         if chroma_reference {
-            self.encode_plane_unit(1, r, c, bw);
-            self.encode_plane_unit(2, r, c, bw);
+            self.encode_plane_unit(1, r, c, bw, DC_PRED);
+            self.encode_plane_unit(2, r, c, bw, DC_PRED);
         }
     }
 
@@ -352,7 +387,7 @@ impl<'a> FrameEncoder<'a> {
         usize::from(above) + usize::from(left)
     }
 
-    fn block_is_skippable(&self, r: usize, c: usize, bw: usize) -> bool {
+    fn block_is_skippable(&self, r: usize, c: usize, bw: usize, y_mode: u8) -> bool {
         for plane in 0..self.planes.len() {
             let shift_x = if plane == 0 { 0 } else { self.subsampling_x };
             let shift_y = if plane == 0 { 0 } else { self.subsampling_y };
@@ -360,19 +395,82 @@ impl<'a> FrameEncoder<'a> {
             let sy = (r * 4) >> shift_y;
             let unit_w = (bw >> shift_x).max(4);
             let unit_h = (bw >> shift_y).max(4);
-            let value = self.sample(plane, sx, sy);
             for y in 0..unit_h {
                 for x in 0..unit_w {
-                    if self.sample(plane, sx + x, sy + y) != value {
+                    let prediction = self.predict_block_sample(
+                        plane,
+                        sx + x,
+                        sy + y,
+                        if plane == 0 { y_mode } else { DC_PRED },
+                        sx,
+                        sy,
+                        bw,
+                    );
+                    if self.sample(plane, sx + x, sy + y) != prediction {
                         return false;
                     }
                 }
             }
-            if self.dc_avg(plane, sx, sy) != value {
-                return false;
-            }
         }
         true
+    }
+
+    fn select_y_mode(&self, r: usize, c: usize, bw: usize) -> u8 {
+        // Keep subsampled lossless planes on the proven DC path for now.  In
+        // those modes the luma/chroma reference grid has additional
+        // alignment rules; the directional search is enabled first for
+        // full-resolution identity planes where the reference is direct.
+        if self.subsampling_x != 0 || self.subsampling_y != 0 {
+            return DC_PRED;
+        }
+        // Directional references over the coded-grid padding come from the
+        // decoder's reconstructed padding, not directly from the cropped
+        // source. Keep boundary blocks on the already exact DC path until a
+        // reconstruction buffer is available for those references.
+        let block_sx = c * 4;
+        let block_sy = r * 4;
+        if block_sx + bw > self.plane_widths[0] || block_sy + bw > self.plane_heights[0] {
+            return DC_PRED;
+        }
+        let mut best_mode = DC_PRED;
+        let mut best_error = self.mode_error(r, c, bw, DC_PRED);
+        let mut candidates = vec![V_PRED, H_PRED];
+        let above_mode = if r > 0 {
+            self.mi_ymode[(r - 1) * self.mi_cols + c]
+        } else {
+            DC_PRED
+        };
+        let left_mode = if c > 0 {
+            self.mi_ymode[r * self.mi_cols + c - 1]
+        } else {
+            DC_PRED
+        };
+        if intra_mode_context(above_mode) == 0 && intra_mode_context(left_mode) == 0 {
+            candidates.push(PAETH_PRED);
+        }
+        for mode in candidates {
+            let error = self.mode_error(r, c, bw, mode);
+            if error < best_error {
+                best_mode = mode;
+                best_error = error;
+            }
+        }
+        best_mode
+    }
+
+    fn mode_error(&self, r: usize, c: usize, bw: usize, mode: u8) -> u64 {
+        let sx = c * 4;
+        let sy = r * 4;
+        let mut error = 0u64;
+        for y in 0..bw {
+            for x in 0..bw {
+                error += self
+                    .sample(0, sx + x, sy + y)
+                    .abs_diff(self.predict_block_sample(0, sx + x, sy + y, mode, sx, sy, bw))
+                    as u64;
+            }
+        }
+        error
     }
 
     /// Selects the deliberately narrow palette path: monochrome blocks with
@@ -536,7 +634,7 @@ impl<'a> FrameEncoder<'a> {
         }
     }
 
-    fn encode_plane_unit(&mut self, plane: usize, r: usize, c: usize, bw: usize) {
+    fn encode_plane_unit(&mut self, plane: usize, r: usize, c: usize, bw: usize, mode: u8) {
         let shift_x = if plane == 0 { 0 } else { self.subsampling_x };
         let shift_y = if plane == 0 { 0 } else { self.subsampling_y };
         let sx = (c * 4) >> shift_x;
@@ -552,11 +650,12 @@ impl<'a> FrameEncoder<'a> {
                 if px >= self.plane_coded_widths[plane] || py >= self.plane_coded_heights[plane] {
                     continue;
                 }
-                self.transform_block(plane, px, py, bw, unit_w * unit_h);
+                self.transform_block(plane, px, py, bw, unit_w * unit_h, mode, sx, sy);
             }
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn transform_block(
         &mut self,
         plane: usize,
@@ -564,16 +663,91 @@ impl<'a> FrameEncoder<'a> {
         sy: usize,
         block_width: usize,
         block_area: usize,
+        mode: u8,
+        block_sx: usize,
+        block_sy: usize,
     ) {
-        let avg = self.dc_avg(plane, sx, sy);
         let mut res = [0i32; 16];
         for i in 0..4 {
             for j in 0..4 {
-                res[i * 4 + j] = self.sample(plane, sx + j, sy + i) - avg;
+                res[i * 4 + j] = self.sample(plane, sx + j, sy + i)
+                    - self.predict_block_sample(
+                        plane,
+                        sx + j,
+                        sy + i,
+                        mode,
+                        block_sx,
+                        block_sy,
+                        block_width,
+                    );
             }
         }
         let quant = gamut_dsp::fwht4x4(&res);
         self.code_coeffs(plane, sx >> 2, sy >> 2, block_width, block_area, &quant);
+    }
+
+    /// Lossless 4×4 prediction for the two cardinal directional modes.  The
+    /// fallback values match AV1's unavailable-edge reference construction:
+    /// above defaults to `2^(bd-1)-1`, left to `2^(bd-1)+1`, and the first
+    /// available edge is replicated across the missing side.
+    #[allow(clippy::too_many_arguments)]
+    fn predict_block_sample(
+        &self,
+        plane: usize,
+        sx: usize,
+        sy: usize,
+        mode: u8,
+        block_sx: usize,
+        block_sy: usize,
+        _block_width: usize,
+    ) -> i32 {
+        if mode == DC_PRED {
+            return self.dc_avg(plane, sx & !3, sy & !3);
+        }
+        let mid = 1 << (self.bit_depth - 1);
+        let x_offset = sx - block_sx;
+        let y_offset = sy - block_sy;
+        let above = if block_sy > 0 {
+            self.sample(plane, block_sx + x_offset, block_sy - 1)
+        } else if block_sx > 0 {
+            self.sample(plane, block_sx - 1, block_sy)
+        } else {
+            mid - 1
+        };
+        let left = if block_sx > 0 {
+            self.sample(plane, block_sx - 1, block_sy + y_offset)
+        } else if block_sy > 0 {
+            self.sample(plane, block_sx, block_sy - 1)
+        } else {
+            mid + 1
+        };
+        match mode {
+            V_PRED => above,
+            H_PRED => left,
+            PAETH_PRED => {
+                let top_left = if block_sx > 0 && block_sy > 0 {
+                    self.sample(plane, block_sx - 1, block_sy - 1)
+                } else if block_sy > 0 {
+                    self.sample(plane, block_sx, block_sy - 1)
+                } else if block_sx > 0 {
+                    self.sample(plane, block_sx - 1, block_sy)
+                } else {
+                    mid
+                };
+                let base = above + left - top_left;
+                let p_left = (base - left).abs();
+                let p_top = (base - above).abs();
+                let p_top_left = (base - top_left).abs();
+                if p_left <= p_top && p_left <= p_top_left {
+                    left
+                } else if p_top <= p_top_left {
+                    above
+                } else {
+                    top_left
+                }
+            }
+            _ => unreachable!("lossless mode search only emits DC/V/H/PAETH"),
+        }
     }
 
     /// DC intra prediction value for a 4×4 at coded position `(sx, sy)` (§7.11.2.5). Neighbours are
@@ -837,6 +1011,56 @@ fn palette_color_context(
     let hash = (scores[0] + scores[1] * 2 + scores[2] * 2) as usize;
     let context = usize::try_from(cdf::PALETTE_COLOR_CONTEXT[hash]).unwrap_or(0);
     (order, context)
+}
+
+fn intra_mode_context(mode: u8) -> usize {
+    match mode {
+        0 | 9 | 12 => 0,
+        1 | 10 => 1,
+        2 | 11 => 2,
+        3 | 8 => 3,
+        _ => 4,
+    }
+}
+
+fn intra_frame_y_mode_cdf(above: usize, left: usize) -> [u16; 13] {
+    if above == 0 && left == 0 {
+        return cdf::INTRA_FRAME_Y_MODE_DC_DC;
+    }
+    let first = cdf::INTRA_FRAME_Y_MODE_FIRST3[above][left];
+    [
+        first[0], first[1], first[2], 32768, 32768, 32768, 32768, 32768, 32768, 32768, 32768,
+        32768, 32768,
+    ]
+}
+
+fn uv_mode_cfl_not_allowed_cdf(y_mode: u8) -> [u16; 13] {
+    if y_mode == DC_PRED {
+        return cdf::UV_MODE_CFL_NOT_ALLOWED_DC;
+    }
+    let first = if y_mode == PAETH_PRED {
+        12124
+    } else {
+        cdf::UV_MODE_CFL_NOT_ALLOWED_FIRST[usize::from(y_mode.min(2))]
+    };
+    [
+        first, 32768, 32768, 32768, 32768, 32768, 32768, 32768, 32768, 32768, 32768, 32768, 32768,
+    ]
+}
+
+fn uv_mode_cfl_allowed_cdf(y_mode: u8) -> [u16; 14] {
+    if y_mode == DC_PRED {
+        return cdf::UV_MODE_CFL_ALLOWED_DC;
+    }
+    let first = if y_mode == PAETH_PRED {
+        3144
+    } else {
+        cdf::UV_MODE_CFL_ALLOWED_FIRST[usize::from(y_mode.min(2))]
+    };
+    [
+        first, 32768, 32768, 32768, 32768, 32768, 32768, 32768, 32768, 32768, 32768, 32768, 32768,
+        32768,
+    ]
 }
 
 /// Selects the partition CDF by `bsl` (`Mi_Width_Log2`); M0 never uses 128×128 superblocks.

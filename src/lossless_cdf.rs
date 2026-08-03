@@ -103,6 +103,57 @@ pub static INTRA_FRAME_Y_MODE_DC_DC: [u16; 13] = [
     15588, 17027, 19338, 20218, 20682, 21110, 21825, 23244, 24189, 28165, 29093, 30466, 32768,
 ];
 
+/// First three boundaries of `Default_Intra_Frame_Y_Mode_Cdf`, indexed by
+/// the above/left intra-mode contexts.  The lossless search currently emits
+/// DC, V, H, and a constrained PAETH candidate while retaining the AV1
+/// 13-symbol alphabet.
+pub static INTRA_FRAME_Y_MODE_FIRST3: [[[u16; 3]; 5]; 5] = [
+    [
+        [15588, 17027, 19338],
+        [12016, 18066, 19516],
+        [10052, 10771, 22296],
+        [14091, 15406, 16442],
+        [12122, 13265, 15603],
+    ],
+    [
+        [10023, 19585, 20848],
+        [5983, 24099, 24560],
+        [7444, 12781, 20177],
+        [8537, 14689, 15432],
+        [7543, 14231, 15496],
+    ],
+    [
+        [12613, 13591, 21383],
+        [9687, 13470, 18506],
+        [6183, 6505, 26024],
+        [10718, 11734, 14954],
+        [9194, 9858, 16501],
+    ],
+    [
+        [12602, 14399, 15488],
+        [8203, 13821, 14524],
+        [8451, 9731, 15004],
+        [7714, 9048, 9516],
+        [8843, 10280, 11496],
+    ],
+    [
+        [12578, 13671, 15979],
+        [9563, 13626, 15080],
+        [8356, 8901, 17616],
+        [10835, 11815, 13124],
+        [7618, 8288, 9859],
+    ],
+];
+
+pub static ANGLE_DELTA_V: [u16; 7] = [2180, 5032, 7567, 22776, 26989, 30217, 32768];
+pub static ANGLE_DELTA_H: [u16; 7] = [2301, 5608, 8801, 23487, 26974, 30330, 32768];
+
+/// First boundaries for UV/DC, indexed by luma mode.  Only UV/DC is
+/// emitted here, but the full AV1 13/14-symbol alphabet is retained by the
+/// helper in `lossless_tile`.
+pub static UV_MODE_CFL_NOT_ALLOWED_FIRST: [u16; 3] = [22631, 9513, 9845];
+pub static UV_MODE_CFL_ALLOWED_FIRST: [u16; 3] = [10407, 4532, 5273];
+
 /// `Default_Uv_Mode_Cfl_Not_Allowed_Cdf[DC_PRED]` (blocks larger than 4×4 in 4:4:4 lossless).
 pub static UV_MODE_CFL_NOT_ALLOWED_DC: [u16; 13] = [
     22631, 24152, 25378, 25661, 25986, 26520, 27055, 27923, 28244, 30059, 30941, 31961, 32768,
