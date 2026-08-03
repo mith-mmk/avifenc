@@ -183,7 +183,7 @@ pub(crate) fn frame_header_payload(
 ) -> Vec<u8> {
     let mut w = BitWriter::new();
     // reduced_still_picture_header ⇒ KEY_FRAME, show_frame=1, FrameIsIntra=1 (no bits).
-    w.put_bit(1); // disable_cdf_update = 1
+    w.put_bit(0); // disable_cdf_update = 0; use the adaptive AV1 default CDFs
     w.put_bit(1); // allow_screen_content_tools = 1 (palette mode)
     w.put_bit(0); // force_integer_mv (integer motion is irrelevant for an intra still)
     // frame_size_override_flag=0; order_hint f(0); primary_ref_frame

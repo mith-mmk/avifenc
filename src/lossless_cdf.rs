@@ -4,8 +4,8 @@
 //! Only the slices the encoder touches are included: `base_q_idx == 0` ⇒ coefficient-CDF quant
 //! context 0, and `TX_4X4` only. CDFs are stored in the spec's cumulative form (rising to 32768)
 //! with the trailing adaptation-count element dropped, so each row is ready to pass straight to
-//! [`gamut_bitstream::SymbolEncoder::encode_symbol`] (the M0 frame sets `disable_cdf_update = 1`,
-//! so the tables are never adapted). These values are extracted verbatim from the specification.
+//! [`gamut_bitstream::SymbolEncoder::encode_symbol_adapt`]. These values are extracted verbatim
+//! from the specification and copied into per-context state before the first symbol is coded.
 
 // --- Partition CDFs (Default_Partition_W*_Cdf), indexed [ctx]. ---
 /// `Default_Partition_W8_Cdf` (4 partitions: NONE/HORZ/VERT/SPLIT).
@@ -103,56 +103,103 @@ pub static INTRA_FRAME_Y_MODE_DC_DC: [u16; 13] = [
     15588, 17027, 19338, 20218, 20682, 21110, 21825, 23244, 24189, 28165, 29093, 30466, 32768,
 ];
 
-/// First three boundaries of `Default_Intra_Frame_Y_Mode_Cdf`, indexed by
-/// the above/left intra-mode contexts.  The lossless search currently emits
-/// DC, V, H, and a constrained PAETH candidate while retaining the AV1
-/// 13-symbol alphabet.
-pub static INTRA_FRAME_Y_MODE_FIRST3: [[[u16; 3]; 5]; 5] = [
+/// Complete default Y-mode CDF.  Lossless mode uses the same 13-symbol AV1
+/// alphabet as the lossy path when it selects a directional predictor.
+#[rustfmt::skip]
+pub static INTRA_FRAME_Y_MODE: [[[u16; 13]; 5]; 5] = [
     [
-        [15588, 17027, 19338],
-        [12016, 18066, 19516],
-        [10052, 10771, 22296],
-        [14091, 15406, 16442],
-        [12122, 13265, 15603],
+        [15588, 17027, 19338, 20218, 20682, 21110, 21825, 23244, 24189, 28165, 29093, 30466, 32768],
+        [12016, 18066, 19516, 20303, 20719, 21444, 21888, 23032, 24434, 28658, 30172, 31409, 32768],
+        [10052, 10771, 22296, 22788, 23055, 23239, 24133, 25620, 26160, 29336, 29929, 31567, 32768],
+        [14091, 15406, 16442, 18808, 19136, 19546, 19998, 22096, 24746, 29585, 30958, 32462, 32768],
+        [12122, 13265, 15603, 16501, 18609, 20033, 22391, 25583, 26437, 30261, 31073, 32475, 32768],
     ],
     [
-        [10023, 19585, 20848],
-        [5983, 24099, 24560],
-        [7444, 12781, 20177],
-        [8537, 14689, 15432],
-        [7543, 14231, 15496],
+        [10023, 19585, 20848, 21440, 21832, 22760, 23089, 24023, 25381, 29014, 30482, 31436, 32768],
+        [5983, 24099, 24560, 24886, 25066, 25795, 25913, 26423, 27610, 29905, 31276, 31794, 32768],
+        [7444, 12781, 20177, 20728, 21077, 21607, 22170, 23405, 24469, 27915, 29090, 30492, 32768],
+        [8537, 14689, 15432, 17087, 17408, 18172, 18408, 19825, 24649, 29153, 31096, 32210, 32768],
+        [7543, 14231, 15496, 16195, 17905, 20717, 21984, 24516, 26001, 29675, 30981, 31994, 32768],
     ],
     [
-        [12613, 13591, 21383],
-        [9687, 13470, 18506],
-        [6183, 6505, 26024],
-        [10718, 11734, 14954],
-        [9194, 9858, 16501],
+        [12613, 13591, 21383, 22004, 22312, 22577, 23401, 25055, 25729, 29538, 30305, 32077, 32768],
+        [9687, 13470, 18506, 19230, 19604, 20147, 20695, 22062, 23219, 27743, 29211, 30907, 32768],
+        [6183, 6505, 26024, 26252, 26366, 26434, 27082, 28354, 28555, 30467, 30794, 32086, 32768],
+        [10718, 11734, 14954, 17224, 17565, 17924, 18561, 21523, 23878, 28975, 30287, 32252, 32768],
+        [9194, 9858, 16501, 17263, 18424, 19171, 21563, 25961, 26561, 30072, 30737, 32463, 32768],
     ],
     [
-        [12602, 14399, 15488],
-        [8203, 13821, 14524],
-        [8451, 9731, 15004],
-        [7714, 9048, 9516],
-        [8843, 10280, 11496],
+        [12602, 14399, 15488, 18381, 18778, 19315, 19724, 21419, 25060, 29696, 30917, 32409, 32768],
+        [8203, 13821, 14524, 17105, 17439, 18131, 18404, 19468, 25225, 29485, 31158, 32342, 32768],
+        [8451, 9731, 15004, 17643, 18012, 18425, 19070, 21538, 24605, 29118, 30078, 32018, 32768],
+        [7714, 9048, 9516, 16667, 16817, 16994, 17153, 18767, 26743, 30389, 31536, 32528, 32768],
+        [8843, 10280, 11496, 15317, 16652, 17943, 19108, 22718, 25769, 29953, 30983, 32485, 32768],
     ],
     [
-        [12578, 13671, 15979],
-        [9563, 13626, 15080],
-        [8356, 8901, 17616],
-        [10835, 11815, 13124],
-        [7618, 8288, 9859],
+        [12578, 13671, 15979, 16834, 19075, 20913, 22989, 25449, 26219, 30214, 31150, 32477, 32768],
+        [9563, 13626, 15080, 15892, 17756, 20863, 22207, 24236, 25380, 29653, 31143, 32277, 32768],
+        [8356, 8901, 17616, 18256, 19350, 20106, 22598, 25947, 26466, 29900, 30523, 32261, 32768],
+        [10835, 11815, 13124, 16042, 17018, 18039, 18947, 22753, 24615, 29489, 30883, 32482, 32768],
+        [7618, 8288, 9859, 10509, 15386, 18657, 22903, 28776, 29180, 31355, 31802, 32593, 32768],
     ],
 ];
 
 pub static ANGLE_DELTA_V: [u16; 7] = [2180, 5032, 7567, 22776, 26989, 30217, 32768];
 pub static ANGLE_DELTA_H: [u16; 7] = [2301, 5608, 8801, 23487, 26974, 30330, 32768];
+pub static ANGLE_DELTA_D45: [u16; 7] = [3780, 11018, 13699, 19354, 23083, 31286, 32768];
+pub static ANGLE_DELTA_D135: [u16; 7] = [4581, 11226, 15147, 17138, 21834, 28397, 32768];
+pub static ANGLE_DELTA_D113: [u16; 7] = [1737, 10927, 14509, 19588, 22745, 28823, 32768];
+pub static ANGLE_DELTA_D157: [u16; 7] = [2664, 10176, 12485, 17650, 21600, 30495, 32768];
+pub static ANGLE_DELTA_D203: [u16; 7] = [2240, 11096, 15453, 20341, 22561, 28917, 32768];
+pub static ANGLE_DELTA_D67: [u16; 7] = [3605, 10428, 12459, 17676, 21244, 30655, 32768];
 
 /// First boundaries for UV/DC, indexed by luma mode.  Only UV/DC is
 /// emitted here, but the full AV1 13/14-symbol alphabet is retained by the
 /// helper in `lossless_tile`.
-pub static UV_MODE_CFL_NOT_ALLOWED_FIRST: [u16; 3] = [22631, 9513, 9845];
-pub static UV_MODE_CFL_ALLOWED_FIRST: [u16; 3] = [10407, 4532, 5273];
+const fn uv_not_allowed_cdf(first: u16) -> [u16; 13] {
+    [
+        first, 32768, 32768, 32768, 32768, 32768, 32768, 32768, 32768, 32768, 32768, 32768, 32768,
+    ]
+}
+
+const fn uv_allowed_cdf(first: u16) -> [u16; 14] {
+    [
+        first, 32768, 32768, 32768, 32768, 32768, 32768, 32768, 32768, 32768, 32768, 32768, 32768,
+        32768,
+    ]
+}
+
+pub static UV_MODE_CFL_NOT_ALLOWED: [[u16; 13]; 13] = [
+    uv_not_allowed_cdf(22631),
+    uv_not_allowed_cdf(9513),
+    uv_not_allowed_cdf(9845),
+    uv_not_allowed_cdf(13639),
+    uv_not_allowed_cdf(9764),
+    uv_not_allowed_cdf(11825),
+    uv_not_allowed_cdf(14175),
+    uv_not_allowed_cdf(12885),
+    uv_not_allowed_cdf(12026),
+    uv_not_allowed_cdf(19052),
+    uv_not_allowed_cdf(18627),
+    uv_not_allowed_cdf(17026),
+    uv_not_allowed_cdf(12124),
+];
+
+pub static UV_MODE_CFL_ALLOWED: [[u16; 14]; 13] = [
+    uv_allowed_cdf(10407),
+    uv_allowed_cdf(4532),
+    uv_allowed_cdf(5273),
+    uv_allowed_cdf(6740),
+    uv_allowed_cdf(4987),
+    uv_allowed_cdf(5370),
+    uv_allowed_cdf(4816),
+    uv_allowed_cdf(6608),
+    uv_allowed_cdf(5998),
+    uv_allowed_cdf(10660),
+    uv_allowed_cdf(10522),
+    uv_allowed_cdf(10099),
+    uv_allowed_cdf(3144),
+];
 
 /// `Default_Uv_Mode_Cfl_Not_Allowed_Cdf[DC_PRED]` (blocks larger than 4×4 in 4:4:4 lossless).
 pub static UV_MODE_CFL_NOT_ALLOWED_DC: [u16; 13] = [

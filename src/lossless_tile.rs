@@ -2,15 +2,57 @@
 //! intra prediction (§7.11.2), the forward 4×4 WHT (via `gamut-dsp`), and coefficient coding
 //! with full context derivation (§5.11.39, §8.3.2).
 //!
-//! All coded blocks are square intra blocks using a small lossless DC/V/H
-//! search; partitions are `PARTITION_NONE` except at the right/bottom frame
-//! edges, where the spec's forced splitting applies. The frame is coded on
+//! All coded blocks are square intra blocks using lossless AV1 intra prediction;
+//! full superblocks use `PARTITION_NONE` and the right/bottom frame edges use
+//! the spec's forced splitting. The frame is coded on
 //! the MI-unit grid (`mi_cols*4 × mi_rows*4`, i.e. dimensions rounded up to a multiple of 8); the
 //! out-of-frame padding is edge-replicated and cropped away on decode.
 
 use crate::lossless_cdf as cdf;
 use crate::lossless_types::LosslessPlanes;
-use gamut_bitstream::SymbolEncoder;
+use gamut_bitstream::SymbolEncoder as RangeEncoder;
+use std::collections::HashMap;
+
+struct AdaptiveSymbolEncoder {
+    inner: RangeEncoder,
+    cdfs: HashMap<usize, (Vec<u16>, u16)>,
+}
+
+impl AdaptiveSymbolEncoder {
+    fn new() -> Self {
+        Self {
+            inner: RangeEncoder::new(),
+            cdfs: HashMap::new(),
+        }
+    }
+
+    fn encode_symbol(&mut self, symbol: usize, cdf: &'static [u16]) {
+        self.encode_symbol_with_key(symbol, cdf, cdf.as_ptr() as usize);
+    }
+
+    fn encode_symbol_with_key(&mut self, symbol: usize, cdf: &[u16], key: usize) {
+        let state = self.cdfs.entry(key).or_insert_with(|| (cdf.to_vec(), 0));
+        self.inner
+            .encode_symbol_adapt(symbol, &mut state.0, &mut state.1);
+    }
+
+    fn current_cdf(&mut self, cdf: &'static [u16]) -> Vec<u16> {
+        let key = cdf.as_ptr() as usize;
+        self.cdfs
+            .entry(key)
+            .or_insert_with(|| (cdf.to_vec(), 0))
+            .0
+            .clone()
+    }
+
+    fn encode_literal(&mut self, value: u32, bits: u32) {
+        self.inner.encode_literal(value, bits);
+    }
+
+    fn finish(self) -> Vec<u8> {
+        self.inner.finish()
+    }
+}
 
 struct PaletteBlock {
     colors: [u16; 2],
@@ -25,7 +67,31 @@ const COEFF_BASE_PLUS_RANGE: i32 = 14;
 const DC_PRED: u8 = 0;
 const V_PRED: u8 = 1;
 const H_PRED: u8 = 2;
+const D45_PRED: u8 = 3;
+const D135_PRED: u8 = 4;
+const D113_PRED: u8 = 5;
+const D157_PRED: u8 = 6;
+const D203_PRED: u8 = 7;
+const D67_PRED: u8 = 8;
+const SMOOTH_PRED: u8 = 9;
+const SMOOTH_V_PRED: u8 = 10;
+const SMOOTH_H_PRED: u8 = 11;
 const PAETH_PRED: u8 = 12;
+
+const SMOOTH_WEIGHTS_4: [i32; 4] = [255, 149, 85, 64];
+const SMOOTH_WEIGHTS_8: [i32; 8] = [255, 197, 146, 105, 73, 50, 37, 32];
+const SMOOTH_WEIGHTS_16: [i32; 16] = [
+    255, 225, 196, 170, 145, 123, 102, 84, 68, 54, 43, 33, 26, 20, 17, 16,
+];
+const SMOOTH_WEIGHTS_32: [i32; 32] = [
+    255, 240, 225, 210, 196, 182, 169, 157, 145, 133, 122, 111, 101, 92, 83, 74, 66, 59, 52, 45,
+    39, 34, 29, 25, 21, 17, 14, 12, 10, 9, 8, 8,
+];
+const SMOOTH_WEIGHTS_64: [i32; 64] = [
+    255, 248, 240, 233, 225, 218, 210, 203, 196, 189, 182, 176, 169, 163, 156, 150, 144, 138, 133,
+    127, 121, 116, 111, 106, 101, 96, 91, 86, 82, 77, 73, 69, 65, 61, 57, 54, 50, 47, 44, 41, 38,
+    35, 32, 29, 27, 25, 22, 20, 18, 16, 15, 13, 12, 10, 9, 8, 7, 6, 6, 5, 5, 4, 4, 4,
+];
 
 /// Encoder for the single tile that spans the whole frame.
 pub(crate) struct FrameEncoder<'a> {
@@ -40,7 +106,7 @@ pub(crate) struct FrameEncoder<'a> {
     plane_coded_heights: Vec<usize>,
     mi_cols: usize,
     mi_rows: usize,
-    sym: SymbolEncoder,
+    sym: AdaptiveSymbolEncoder,
     above_level: Vec<Vec<u8>>,
     above_dc: Vec<Vec<u8>>,
     left_level: Vec<Vec<u8>>,
@@ -121,7 +187,7 @@ impl<'a> FrameEncoder<'a> {
                 .collect(),
             mi_cols,
             mi_rows,
-            sym: SymbolEncoder::new(),
+            sym: AdaptiveSymbolEncoder::new(),
             above_level: (0..plane_count)
                 .map(|plane| {
                     vec![
@@ -240,13 +306,19 @@ impl<'a> FrameEncoder<'a> {
             false
         } else if has_cols {
             let ctx = self.partition_ctx(r, c, bsl);
-            let cdf2 = split_or_horz_cdf(partition_cdf(bsl, ctx));
-            self.sym.encode_symbol(1, &cdf2); // split
+            let partition = partition_cdf(bsl, ctx);
+            let current = self.sym.current_cdf(partition);
+            let cdf2 = split_or_horz_cdf(&current);
+            self.sym
+                .encode_symbol_with_key(1, &cdf2, split_cdf_key(bsl, ctx, false)); // split
             true
         } else if has_rows {
             let ctx = self.partition_ctx(r, c, bsl);
-            let cdf2 = split_or_vert_cdf(partition_cdf(bsl, ctx));
-            self.sym.encode_symbol(1, &cdf2); // split
+            let partition = partition_cdf(bsl, ctx);
+            let current = self.sym.current_cdf(partition);
+            let cdf2 = split_or_vert_cdf(&current);
+            self.sym
+                .encode_symbol_with_key(1, &cdf2, split_cdf_key(bsl, ctx, true)); // split
             true
         } else {
             true // forced PARTITION_SPLIT, no symbol
@@ -296,13 +368,9 @@ impl<'a> FrameEncoder<'a> {
         let above_context = intra_mode_context(above_mode);
         let left_context = intra_mode_context(left_mode);
         let y_mode_cdf = intra_frame_y_mode_cdf(above_context, left_context);
-        self.sym.encode_symbol(usize::from(y_mode), &y_mode_cdf);
-        if bw >= 8 {
-            if y_mode == V_PRED {
-                self.sym.encode_symbol(3, &cdf::ANGLE_DELTA_V);
-            } else if y_mode == H_PRED {
-                self.sym.encode_symbol(3, &cdf::ANGLE_DELTA_H);
-            }
+        self.sym.encode_symbol(usize::from(y_mode), y_mode_cdf);
+        if bw >= 8 && is_directional_mode(y_mode) {
+            self.sym.encode_symbol(3, angle_delta_cdf(y_mode));
         }
         let chroma_reference = !self.monochrome && self.is_chroma_reference(r, c, bw);
         if chroma_reference {
@@ -313,10 +381,10 @@ impl<'a> FrameEncoder<'a> {
             let cfl_allowed = chroma_width == 4 && chroma_height == 4;
             if cfl_allowed {
                 let uv = uv_mode_cfl_allowed_cdf(y_mode);
-                self.sym.encode_symbol(0, &uv);
+                self.sym.encode_symbol(0, uv);
             } else {
                 let uv = uv_mode_cfl_not_allowed_cdf(y_mode);
-                self.sym.encode_symbol(0, &uv);
+                self.sym.encode_symbol(0, uv);
             }
         }
 
@@ -699,7 +767,7 @@ impl<'a> FrameEncoder<'a> {
         mode: u8,
         block_sx: usize,
         block_sy: usize,
-        _block_width: usize,
+        block_width: usize,
     ) -> i32 {
         if mode == DC_PRED {
             return self.dc_avg(plane, sx & !3, sy & !3);
@@ -724,6 +792,54 @@ impl<'a> FrameEncoder<'a> {
         match mode {
             V_PRED => above,
             H_PRED => left,
+            D45_PRED | D67_PRED => {
+                let derivative = if mode == D45_PRED { 64 } else { 27 };
+                directional_zone_one(
+                    &self.reference_above(plane, block_sx, block_sy, block_sx + block_width),
+                    x_offset,
+                    y_offset,
+                    derivative,
+                )
+            }
+            D203_PRED => directional_zone_three(
+                &self.reference_left(plane, block_sx, block_sy, block_sy + block_width),
+                x_offset,
+                y_offset,
+                27,
+            ),
+            D135_PRED | D113_PRED | D157_PRED => {
+                let (dx, dy) = match mode {
+                    D135_PRED => (64, 64),
+                    D113_PRED => (27, 151),
+                    _ => (151, 27),
+                };
+                directional_zone_two(
+                    &self.reference_above(plane, block_sx, block_sy, block_sx + block_width),
+                    &self.reference_left(plane, block_sx, block_sy, block_sy + block_width),
+                    self.reference_top_left(plane, block_sx, block_sy),
+                    x_offset,
+                    y_offset,
+                    dx,
+                    dy,
+                )
+            }
+            SMOOTH_PRED | SMOOTH_V_PRED | SMOOTH_H_PRED => {
+                let above_ref =
+                    self.reference_above(plane, block_sx, block_sy, block_sx + block_width);
+                let left_ref =
+                    self.reference_left(plane, block_sx, block_sy, block_sy + block_width);
+                let top_right = above_ref[block_width - 1];
+                let bottom_left = left_ref[block_width - 1];
+                let wx = smooth_weight(block_width, x_offset);
+                let wy = smooth_weight(block_width, y_offset);
+                let smooth_v = (wy * above_ref[x_offset] + (256 - wy) * bottom_left + 128) >> 8;
+                let smooth_h = (wx * left_ref[y_offset] + (256 - wx) * top_right + 128) >> 8;
+                match mode {
+                    SMOOTH_V_PRED => smooth_v,
+                    SMOOTH_H_PRED => smooth_h,
+                    _ => (smooth_v + smooth_h + 1) >> 1,
+                }
+            }
             PAETH_PRED => {
                 let top_left = if block_sx > 0 && block_sy > 0 {
                     self.sample(plane, block_sx - 1, block_sy - 1)
@@ -746,12 +862,65 @@ impl<'a> FrameEncoder<'a> {
                     top_left
                 }
             }
-            _ => unreachable!("lossless mode search only emits DC/V/H/PAETH"),
+            _ => unreachable!("lossless mode search only emits AV1 intra modes"),
         }
     }
 
-    /// DC intra prediction value for a 4×4 at coded position `(sx, sy)` (§7.11.2.5). Neighbours are
-    /// the reconstructed samples, which equal the (padded) source under lossless coding.
+    fn reference_above(
+        &self,
+        plane: usize,
+        block_sx: usize,
+        block_sy: usize,
+        block_end_x: usize,
+    ) -> Vec<i32> {
+        let n = block_end_x - block_sx;
+        let fallback = 1 << (self.bit_depth - 1);
+        if block_sy > 0 {
+            (0..2 * n + 1)
+                .map(|x| self.sample(plane, block_sx + x, block_sy - 1))
+                .collect()
+        } else if block_sx > 0 {
+            vec![self.sample(plane, block_sx - 1, block_sy); 2 * n + 1]
+        } else {
+            vec![fallback - 1; 2 * n + 1]
+        }
+    }
+
+    fn reference_left(
+        &self,
+        plane: usize,
+        block_sx: usize,
+        block_sy: usize,
+        block_end_y: usize,
+    ) -> Vec<i32> {
+        let n = block_end_y - block_sy;
+        let fallback = 1 << (self.bit_depth - 1);
+        if block_sx > 0 {
+            (0..2 * n + 1)
+                .map(|y| self.sample(plane, block_sx - 1, block_sy + y))
+                .collect()
+        } else if block_sy > 0 {
+            vec![self.sample(plane, block_sx, block_sy - 1); 2 * n + 1]
+        } else {
+            vec![fallback + 1; 2 * n + 1]
+        }
+    }
+
+    fn reference_top_left(&self, plane: usize, block_sx: usize, block_sy: usize) -> i32 {
+        let mid = 1 << (self.bit_depth - 1);
+        if block_sx > 0 && block_sy > 0 {
+            self.sample(plane, block_sx - 1, block_sy - 1)
+        } else if block_sy > 0 {
+            self.sample(plane, block_sx, block_sy - 1)
+        } else if block_sx > 0 {
+            self.sample(plane, block_sx - 1, block_sy)
+        } else {
+            mid
+        }
+    }
+
+    /// DC intra prediction value for a 4×4 transform block (§7.11.2.5). Neighbours are the
+    /// reconstructed samples, which equal the (padded) source under lossless coding.
     fn dc_avg(&self, plane: usize, sx: usize, sy: usize) -> i32 {
         let have_above = sy > 0;
         let have_left = sx > 0;
@@ -955,7 +1124,7 @@ fn palette_block_size_context(bw: usize) -> usize {
     (2 * bw.ilog2() as usize).saturating_sub(6).min(6)
 }
 
-fn encode_ns(sym: &mut SymbolEncoder, value: usize, n: usize) {
+fn encode_ns(sym: &mut AdaptiveSymbolEncoder, value: usize, n: usize) {
     if n <= 1 {
         return;
     }
@@ -1023,44 +1192,102 @@ fn intra_mode_context(mode: u8) -> usize {
     }
 }
 
-fn intra_frame_y_mode_cdf(above: usize, left: usize) -> [u16; 13] {
+const fn is_directional_mode(mode: u8) -> bool {
+    mode >= V_PRED && mode <= D67_PRED
+}
+
+fn smooth_weight(block_width: usize, index: usize) -> i32 {
+    match block_width {
+        4 => SMOOTH_WEIGHTS_4[index],
+        8 => SMOOTH_WEIGHTS_8[index],
+        16 => SMOOTH_WEIGHTS_16[index],
+        32 => SMOOTH_WEIGHTS_32[index],
+        64 => SMOOTH_WEIGHTS_64[index],
+        _ => unreachable!("lossless blocks use AV1 square sizes"),
+    }
+}
+
+fn angle_delta_cdf(mode: u8) -> &'static [u16; 7] {
+    match mode {
+        V_PRED => &cdf::ANGLE_DELTA_V,
+        H_PRED => &cdf::ANGLE_DELTA_H,
+        D45_PRED => &cdf::ANGLE_DELTA_D45,
+        D135_PRED => &cdf::ANGLE_DELTA_D135,
+        D113_PRED => &cdf::ANGLE_DELTA_D113,
+        D157_PRED => &cdf::ANGLE_DELTA_D157,
+        D203_PRED => &cdf::ANGLE_DELTA_D203,
+        D67_PRED => &cdf::ANGLE_DELTA_D67,
+        _ => unreachable!("angle delta is only signalled for directional modes"),
+    }
+}
+
+fn interpolate(a: i32, b: i32, shift: i32) -> i32 {
+    (a * (32 - shift) + b * shift + 16) >> 5
+}
+
+fn directional_zone_one(reference: &[i32], x: usize, y: usize, derivative: i32) -> i32 {
+    let index = (y as i32 + 1) * derivative;
+    let base = (index >> 6) as usize + x;
+    interpolate(reference[base], reference[base + 1], (index >> 1) & 31)
+}
+
+fn directional_zone_three(reference: &[i32], x: usize, y: usize, derivative: i32) -> i32 {
+    let index = (x as i32 + 1) * derivative;
+    let base = (index >> 6) as usize + y;
+    interpolate(reference[base], reference[base + 1], (index >> 1) & 31)
+}
+
+fn directional_zone_two(
+    above: &[i32],
+    left: &[i32],
+    top_left: i32,
+    x: usize,
+    y: usize,
+    dx: i32,
+    dy: i32,
+) -> i32 {
+    let index = (x as i32) * 64 - (y as i32 + 1) * dx;
+    let base = index >> 6;
+    if base >= -1 {
+        let shift = (index >> 1) & 31;
+        let a0 = if base < 0 {
+            top_left
+        } else {
+            above[base as usize]
+        };
+        interpolate(a0, above[(base + 1) as usize], shift)
+    } else {
+        let index = (y as i32) * 64 - (x as i32 + 1) * dy;
+        let base = index >> 6;
+        let shift = (index >> 1) & 31;
+        let a0 = if base < 0 {
+            top_left
+        } else {
+            left[base as usize]
+        };
+        interpolate(a0, left[(base + 1) as usize], shift)
+    }
+}
+
+fn intra_frame_y_mode_cdf(above: usize, left: usize) -> &'static [u16; 13] {
     if above == 0 && left == 0 {
-        return cdf::INTRA_FRAME_Y_MODE_DC_DC;
+        return &cdf::INTRA_FRAME_Y_MODE_DC_DC;
     }
-    let first = cdf::INTRA_FRAME_Y_MODE_FIRST3[above][left];
-    [
-        first[0], first[1], first[2], 32768, 32768, 32768, 32768, 32768, 32768, 32768, 32768,
-        32768, 32768,
-    ]
+    &cdf::INTRA_FRAME_Y_MODE[above][left]
 }
 
-fn uv_mode_cfl_not_allowed_cdf(y_mode: u8) -> [u16; 13] {
+fn uv_mode_cfl_not_allowed_cdf(y_mode: u8) -> &'static [u16; 13] {
     if y_mode == DC_PRED {
-        return cdf::UV_MODE_CFL_NOT_ALLOWED_DC;
+        return &cdf::UV_MODE_CFL_NOT_ALLOWED_DC;
     }
-    let first = if y_mode == PAETH_PRED {
-        12124
-    } else {
-        cdf::UV_MODE_CFL_NOT_ALLOWED_FIRST[usize::from(y_mode.min(2))]
-    };
-    [
-        first, 32768, 32768, 32768, 32768, 32768, 32768, 32768, 32768, 32768, 32768, 32768, 32768,
-    ]
+    &cdf::UV_MODE_CFL_NOT_ALLOWED[usize::from(y_mode.min(12))]
 }
 
-fn uv_mode_cfl_allowed_cdf(y_mode: u8) -> [u16; 14] {
+fn uv_mode_cfl_allowed_cdf(y_mode: u8) -> &'static [u16; 14] {
     if y_mode == DC_PRED {
-        return cdf::UV_MODE_CFL_ALLOWED_DC;
+        return &cdf::UV_MODE_CFL_ALLOWED_DC;
     }
-    let first = if y_mode == PAETH_PRED {
-        3144
-    } else {
-        cdf::UV_MODE_CFL_ALLOWED_FIRST[usize::from(y_mode.min(2))]
-    };
-    [
-        first, 32768, 32768, 32768, 32768, 32768, 32768, 32768, 32768, 32768, 32768, 32768, 32768,
-        32768,
-    ]
+    &cdf::UV_MODE_CFL_ALLOWED[usize::from(y_mode.min(12))]
 }
 
 /// Selects the partition CDF by `bsl` (`Mi_Width_Log2`); M0 never uses 128×128 superblocks.
@@ -1094,6 +1321,10 @@ fn split_or_vert_cdf(p: &[u16]) -> [u16; 2] {
         + (p[6] - p[5])
         + (p[8] - p[7]);
     [32768 - psum, 32768]
+}
+
+fn split_cdf_key(bsl: usize, ctx: usize, vertical: bool) -> usize {
+    0x1000_0000 | (bsl << 8) | (ctx << 1) | usize::from(vertical)
 }
 
 /// `eobPt` from `eob` (inverts `eob = (eobPt < 2) ? eobPt : (1 << (eobPt-2)) + 1`, §5.11.39).
@@ -1153,7 +1384,7 @@ fn coeff_br_ctx(pos: usize, levels: &[i32; 16]) -> usize {
 }
 
 /// Exp-Golomb tail used for coefficient magnitudes above the base-range cap (§5.11.39).
-fn golomb(sym: &mut SymbolEncoder, x: u32) {
+fn golomb(sym: &mut AdaptiveSymbolEncoder, x: u32) {
     let len = 32 - x.leading_zeros(); // bit length, x >= 1
     for _ in 0..(len - 1) {
         sym.encode_literal(0, 1);
