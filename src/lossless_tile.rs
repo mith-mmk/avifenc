@@ -117,6 +117,125 @@ const AL_PART_CTX: [[[u8; 4]; 5]; 2] = [
 /// is `-1..=16` in both directions (§5.11.3).
 const BD_STRIDE: usize = 18;
 
+/// Returns whether a color frame contains a block that can use the narrow
+/// lossless palette path.  Screen-content syntax is enabled at frame scope,
+/// so avoid paying its per-block signaling cost when no such block exists.
+pub(crate) fn needs_screen_content_tools(planes: &LosslessPlanes<'_>) -> bool {
+    if planes.monochrome {
+        return true;
+    }
+    if planes.subsampling_x != 0
+        || planes.subsampling_y != 0
+        || planes.planes.len() < 3
+        || planes.width < 8
+        || planes.height < 8
+    {
+        return false;
+    }
+    let width = planes.width as usize;
+    let height = planes.height as usize;
+    for &block_width in &[8usize, 16, 32, 64] {
+        if block_width > width || block_width > height {
+            continue;
+        }
+        for sy in (0..=height - block_width).step_by(block_width) {
+            for sx in (0..=width - block_width).step_by(block_width) {
+                if color_palette_candidate(planes, sx, sy, block_width) {
+                    return true;
+                }
+            }
+        }
+    }
+    false
+}
+
+fn color_palette_candidate(
+    planes: &LosslessPlanes<'_>,
+    sx: usize,
+    sy: usize,
+    block_width: usize,
+) -> bool {
+    let width = planes.width as usize;
+    let mut colors = [None, None];
+    for y in 0..block_width {
+        for x in 0..block_width {
+            let value = planes.planes[0][(sy + y) * width + sx + x];
+            if colors[0] == Some(value) || colors[1] == Some(value) {
+                continue;
+            }
+            if colors[0].is_none() {
+                colors[0] = Some(value);
+            } else if colors[1].is_none() {
+                colors[1] = Some(value);
+            } else {
+                return false;
+            }
+        }
+    }
+    if colors[1].is_none() {
+        return false;
+    }
+    for plane in 1..3 {
+        let value = planes.planes[plane][sy * width + sx];
+        for y in 0..block_width {
+            for x in 0..block_width {
+                if planes.planes[plane][(sy + y) * width + sx + x] != value {
+                    return false;
+                }
+            }
+        }
+        if source_dc_prediction(
+            planes.planes[plane],
+            width,
+            sx,
+            sy,
+            block_width,
+            planes.bit_depth,
+        ) != value
+        {
+            return false;
+        }
+    }
+    true
+}
+
+fn source_dc_prediction(
+    plane: &[u16],
+    width: usize,
+    sx: usize,
+    sy: usize,
+    block_width: usize,
+    bit_depth: u8,
+) -> u16 {
+    match (sy > 0, sx > 0) {
+        (true, true) => {
+            let mut sum = 0u32;
+            for x in 0..block_width {
+                sum += u32::from(plane[(sy - 1) * width + sx + x]);
+            }
+            for y in 0..block_width {
+                sum += u32::from(plane[(sy + y) * width + sx - 1]);
+            }
+            ((sum + block_width as u32) / (2 * block_width as u32)) as u16
+        }
+        (false, true) => {
+            let mut sum = 0u32;
+            for y in 0..block_width {
+                sum += u32::from(plane[(sy + y) * width + sx - 1]);
+            }
+            ((sum + block_width as u32 / 2) / block_width as u32) as u16
+        }
+        (true, false) => {
+            let mut sum = 0u32;
+            for x in 0..block_width {
+                sum += u32::from(plane[(sy - 1) * width + sx + x]);
+            }
+            ((sum + block_width as u32 / 2) / block_width as u32) as u16
+        }
+        (false, false) => 1 << (bit_depth - 1),
+    }
+}
+
 /// Encoder for the single tile that spans the whole frame.
 pub(crate) struct FrameEncoder<'a> {
     planes: Vec<&'a [u16]>,
@@ -153,11 +272,12 @@ pub(crate) struct FrameEncoder<'a> {
     mi_palette_size: Vec<u8>,
     /// Sorted luma palette colours of the block covering each MI cell.
     mi_palette_colors: Vec<[u16; 2]>,
+    screen_content_tools: bool,
 }
 
 impl<'a> FrameEncoder<'a> {
     /// Creates an encoder over full-resolution planes (Y=G, U=B, V=R for identity CICP).
-    pub(crate) fn new(planes: &'a LosslessPlanes<'a>) -> Self {
+    pub(crate) fn new(planes: &'a LosslessPlanes<'a>, screen_content_tools: bool) -> Self {
         let width = planes.width as usize;
         let height = planes.height as usize;
         let mi_cols = 2 * ((width + 7) >> 3);
@@ -290,6 +410,7 @@ impl<'a> FrameEncoder<'a> {
             block_decoded: vec![0; BD_STRIDE * BD_STRIDE],
             mi_palette_size: vec![0; mi_cols * mi_rows],
             mi_palette_colors: vec![[0; 2]; mi_cols * mi_rows],
+            screen_content_tools,
         }
     }
 
@@ -511,29 +632,30 @@ impl<'a> FrameEncoder<'a> {
         }
 
         // Palette syntax is present only when screen-content tools are enabled.
-        // The lossless color path keeps that frame-level flag off because this
-        // encoder never selects a chroma/luma palette for color planes; this
-        // avoids emitting a redundant has_palette=0 flag for every block.
-        if self.monochrome && bw >= 8 && y_mode == DC_PRED {
+        // The frame-level flag is gated by a source scan so ordinary color
+        // images do not pay the per-block has_palette signaling cost.
+        if self.screen_content_tools && bw >= 8 {
             let block_size_context = palette_block_size_context(bw);
             let palette_context = self.palette_context(r, c);
-            let has_palette = palette.is_some();
-            self.sym.encode_symbol(
-                usize::from(has_palette),
-                &cdf::PALETTE_Y_MODE[block_size_context][palette_context],
-            );
-            if let Some(palette) = palette.as_ref() {
-                self.sym
-                    .encode_symbol(0, &cdf::PALETTE_Y_SIZE[block_size_context]);
-                let cache = self.palette_cache(r, c);
-                self.signal_palette_colors(palette.colors, &cache);
-                self.signal_palette_tokens(&palette.index_map, bw);
+            if y_mode == DC_PRED {
+                let has_palette = palette.is_some();
+                self.sym.encode_symbol(
+                    usize::from(has_palette),
+                    &cdf::PALETTE_Y_MODE[block_size_context][palette_context],
+                );
+                if let Some(palette) = palette.as_ref() {
+                    self.sym
+                        .encode_symbol(0, &cdf::PALETTE_Y_SIZE[block_size_context]);
+                    let cache = self.palette_cache(r, c);
+                    self.signal_palette_colors(palette.colors, &cache);
+                    self.signal_palette_tokens(&palette.index_map, bw);
+                }
             }
             if chroma_reference {
-                // This encoder only selects luma palette mode. The chroma
-                // palette flag is still present when screen tools are enabled.
+                // has_palette_uv is signalled for every DC chroma block, even
+                // when the luma mode is directional.
                 self.sym
-                    .encode_symbol(0, &cdf::PALETTE_UV_MODE[usize::from(has_palette)]);
+                    .encode_symbol(0, &cdf::PALETTE_UV_MODE[usize::from(palette.is_some())]);
             }
         }
 
@@ -618,12 +740,6 @@ impl<'a> FrameEncoder<'a> {
         if self.subsampling_x != 0 || self.subsampling_y != 0 {
             return DC_PRED;
         }
-        // 4×4 leaves stay on DC until their mode signalling is independently
-        // rate-modelled; larger 32×32 split leaves can use directional modes
-        // with the BlockDecoded edge map above.
-        if !self.monochrome && self.subsampling_x == 0 && self.subsampling_y == 0 && bw <= 8 {
-            return DC_PRED;
-        }
         // Directional references over the coded-grid padding come from the
         // decoder's reconstructed padding, not directly from the cropped
         // source. Keep boundary blocks on the already exact DC path until a
@@ -679,11 +795,14 @@ impl<'a> FrameEncoder<'a> {
         cost
     }
 
-    /// Selects the deliberately narrow palette path: monochrome blocks with
-    /// exactly two colours. The palette cache is handled separately when the
-    /// block is signalled, which keeps bilevel documents compact.
+    /// Selects the deliberately narrow palette path: full-resolution blocks
+    /// with exactly two luma colours and, for color input, flat chroma. The
+    /// palette cache is handled separately when the block is signalled.
     fn palette_block(&self, r: usize, c: usize, bw: usize) -> Option<PaletteBlock> {
-        if !self.monochrome || bw < 8 {
+        if bw < 8
+            || !self.screen_content_tools
+            || (!self.monochrome && (self.subsampling_x != 0 || self.subsampling_y != 0))
+        {
             return None;
         }
         let mut colors = [None, None];
@@ -710,6 +829,21 @@ impl<'a> FrameEncoder<'a> {
         } else {
             [second, first]
         };
+        if !self.monochrome {
+            for plane in 1..3 {
+                let value = self.sample(plane, c * 4, r * 4);
+                for y in 0..bw {
+                    for x in 0..bw {
+                        if self.sample(plane, c * 4 + x, r * 4 + y) != value {
+                            return None;
+                        }
+                    }
+                }
+                if self.dc_pred(plane, c * 4, r * 4, bw, bw) != value {
+                    return None;
+                }
+            }
+        }
         let mut index_map = Vec::with_capacity(bw * bw);
         for y in 0..bw {
             for x in 0..bw {
@@ -1122,30 +1256,36 @@ impl<'a> FrameEncoder<'a> {
     /// DC intra prediction value for a 4×4 transform block (§7.11.2.5). Neighbours are the
     /// reconstructed samples, which equal the (padded) source under lossless coding.
     fn dc_avg(&self, plane: usize, sx: usize, sy: usize) -> i32 {
+        self.dc_pred(plane, sx, sy, 4, 4)
+    }
+
+    fn dc_pred(&self, plane: usize, sx: usize, sy: usize, width: usize, height: usize) -> i32 {
         let have_above = sy > 0;
         let have_left = sx > 0;
         match (have_above, have_left) {
             (true, true) => {
                 let mut s = 0;
-                for k in 0..4 {
+                for k in 0..width {
                     s += self.sample(plane, sx + k, sy - 1);
+                }
+                for k in 0..height {
                     s += self.sample(plane, sx - 1, sy + k);
                 }
-                (s + 4) >> 3
+                (s + ((width + height) / 2) as i32) / (width + height) as i32
             }
             (false, true) => {
                 let mut s = 0;
-                for k in 0..4 {
+                for k in 0..height {
                     s += self.sample(plane, sx - 1, sy + k);
                 }
-                (s + 2) >> 2
+                (s + (height / 2) as i32) / height as i32
             }
             (true, false) => {
                 let mut s = 0;
-                for k in 0..4 {
+                for k in 0..width {
                     s += self.sample(plane, sx + k, sy - 1);
                 }
-                (s + 2) >> 2
+                (s + (width / 2) as i32) / width as i32
             }
             (false, false) => 1 << (self.bit_depth - 1),
         }

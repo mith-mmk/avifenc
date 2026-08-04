@@ -96,6 +96,35 @@ fn monochrome_bilevel_blocks_use_compact_lossless_palette_coding() {
 }
 
 #[test]
+fn full_resolution_color_blocks_can_use_lossless_palette_coding() {
+    let width: usize = 128;
+    let height: usize = 128;
+    let rgba = (0..width * height)
+        .flat_map(|index| {
+            let green = if (index / width / 8 + index % width / 8).is_multiple_of(2usize) {
+                0
+            } else {
+                u8::MAX
+            };
+            [32, green, 128, u8::MAX]
+        })
+        .collect();
+    let encoded = encode_bytes(
+        &ImageBuffer {
+            width,
+            height,
+            rgba,
+        },
+        &EncoderOptions {
+            lossless: true,
+            ..EncoderOptions::default()
+        },
+    )
+    .unwrap();
+    assert!(encoded.len() < 1024);
+}
+
+#[test]
 fn rgba_odd_dimensions_encode_without_chroma_padding_bias() {
     let image = ImageBuffer {
         width: 1,
