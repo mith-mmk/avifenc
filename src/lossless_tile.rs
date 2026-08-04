@@ -343,7 +343,7 @@ impl<'a> FrameEncoder<'a> {
         } else if !self.monochrome
             && self.subsampling_x == 0
             && self.subsampling_y == 0
-            && bw == 64
+            && bw >= 32
             && has_rows
             && has_cols
             && !self.block_is_skippable(r, c, bw, DC_PRED)
@@ -635,20 +635,7 @@ impl<'a> FrameEncoder<'a> {
         }
         let mut best_mode = DC_PRED;
         let mut best_error = self.mode_cost(r, c, bw, DC_PRED);
-        let mut candidates = vec![V_PRED, H_PRED];
-        let above_mode = if r > 0 {
-            self.mi_ymode[(r - 1) * self.mi_cols + c]
-        } else {
-            DC_PRED
-        };
-        let left_mode = if c > 0 {
-            self.mi_ymode[r * self.mi_cols + c - 1]
-        } else {
-            DC_PRED
-        };
-        if intra_mode_context(above_mode) == 0 && intra_mode_context(left_mode) == 0 {
-            candidates.push(PAETH_PRED);
-        }
+        let candidates = [V_PRED, H_PRED, PAETH_PRED];
         for mode in candidates {
             let error = self.mode_cost(r, c, bw, mode);
             if error < best_error {
