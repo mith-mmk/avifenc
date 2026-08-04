@@ -635,7 +635,14 @@ impl<'a> FrameEncoder<'a> {
         }
         let mut best_mode = DC_PRED;
         let mut best_error = self.mode_cost(r, c, bw, DC_PRED);
-        let candidates = [V_PRED, H_PRED, PAETH_PRED];
+        let candidates = [
+            V_PRED,
+            H_PRED,
+            SMOOTH_PRED,
+            SMOOTH_V_PRED,
+            SMOOTH_H_PRED,
+            PAETH_PRED,
+        ];
         for mode in candidates {
             let error = self.mode_cost(r, c, bw, mode);
             if error < best_error {
