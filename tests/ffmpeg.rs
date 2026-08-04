@@ -184,6 +184,27 @@ fn gradient(with_alpha: bool) -> ImageBuffer {
     }
 }
 
+fn large_lossless_gradient() -> ImageBuffer {
+    let width = 128;
+    let height = 128;
+    let mut rgba = Vec::with_capacity(width * height * 4);
+    for y in 0..height {
+        for x in 0..width {
+            rgba.extend_from_slice(&[
+                ((x * 7 + y * 3) & 255) as u8,
+                ((y * 11 + x * 5) & 255) as u8,
+                ((x * 13 + y * 17) & 255) as u8,
+                255,
+            ]);
+        }
+    }
+    ImageBuffer {
+        width,
+        height,
+        rgba,
+    }
+}
+
 #[test]
 fn ffmpeg_decodes_the_encoded_still_when_available() {
     let Some(ffmpeg) = ffmpeg_path() else {
@@ -286,6 +307,23 @@ fn ffmpeg_decodes_opaque_rgba8_lossless_bit_exactly_when_available() {
     assert_eq!(fs::read(&raw).unwrap(), image.rgba);
     let _ = fs::remove_file(input);
     let _ = fs::remove_file(raw);
+}
+
+#[test]
+fn ffmpeg_decodes_large_opaque_lossless_color_with_partition_refinement() {
+    let Some(ffmpeg) = ffmpeg_path() else {
+        eprintln!("ffmpeg is not available; skipping large partition oracle");
+        return;
+    };
+    let input = temporary_path("avif");
+    let image = large_lossless_gradient();
+    let options = EncoderOptions {
+        lossless: true,
+        ..EncoderOptions::default()
+    };
+    fs::write(&input, encode_bytes(&image, &options).unwrap()).unwrap();
+    assert_ffmpeg_raw_decode_equals(&ffmpeg, &input, "rgba", &image.rgba);
+    let _ = fs::remove_file(input);
 }
 
 #[test]

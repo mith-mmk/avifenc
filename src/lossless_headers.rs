@@ -184,13 +184,17 @@ pub(crate) fn frame_header_payload(
     let mut w = BitWriter::new();
     // reduced_still_picture_header ⇒ KEY_FRAME, show_frame=1, FrameIsIntra=1 (no bits).
     w.put_bit(0); // disable_cdf_update = 0; use the adaptive AV1 default CDFs
-    w.put_bit(1); // allow_screen_content_tools = 1 (palette mode)
-    w.put_bit(0); // force_integer_mv (integer motion is irrelevant for an intra still)
+    w.put_bit(u8::from(monochrome)); // allow_screen_content_tools (palette mode only for gray)
+    if monochrome {
+        w.put_bit(0); // force_integer_mv (integer motion is irrelevant for an intra still)
+    }
     // frame_size_override_flag=0; order_hint f(0); primary_ref_frame
     // inferred; refresh_frame_flags inferred — all no bits.
     // frame_size(): no override ⇒ from seq header; superres disabled. render_size():
     w.put_bit(0); // render_and_frame_size_different = 0
-    w.put_bit(0); // allow_intrabc = 0 (screen-content tools are enabled)
+    if monochrome {
+        w.put_bit(0); // allow_intrabc = 0 (screen-content tools are enabled)
+    }
     // disable_frame_end_update_cdf inferred 1.
 
     // tile_info(): single tile. Emit increment-stop bits only where the level/size permit > 0 tiles.

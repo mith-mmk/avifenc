@@ -3,7 +3,8 @@
 //! with full context derivation (§5.11.39, §8.3.2).
 //!
 //! All coded blocks are square intra blocks using lossless AV1 intra prediction;
-//! full superblocks use `PARTITION_NONE` and the right/bottom frame edges use
+//! full-resolution color blocks use deterministic recursive splitting to 4×4 DC leaves, while
+//! monochrome and subsampled inputs keep the compact `PARTITION_NONE` path; right/bottom frame edges use
 //! the spec's forced splitting. The frame is coded on
 //! the MI-unit grid (`mi_cols*4 × mi_rows*4`, i.e. dimensions rounded up to a multiple of 8); the
 //! out-of-frame padding is edge-replicated and cropped away on decode.
@@ -93,6 +94,25 @@ const SMOOTH_WEIGHTS_64: [i32; 64] = [
     35, 32, 29, 27, 25, 22, 20, 18, 16, 15, 13, 12, 10, 9, 8, 7, 6, 6, 5, 5, 4, 4, 4,
 ];
 
+/// `Partition_Context` values for the terminal partition types emitted by this encoder.
+/// The table is `above/left × block-level (128..8) × NONE/HORZ/VERT/SPLIT` (§5.11.4).
+const AL_PART_CTX: [[[u8; 4]; 5]; 2] = [
+    [
+        [0x00, 0x00, 0x10, 0x00],
+        [0x10, 0x10, 0x18, 0x00],
+        [0x18, 0x18, 0x1c, 0x00],
+        [0x1c, 0x1c, 0x1e, 0x00],
+        [0x1e, 0x1e, 0x1f, 0x1f],
+    ],
+    [
+        [0x00, 0x10, 0x00, 0x00],
+        [0x10, 0x18, 0x10, 0x00],
+        [0x18, 0x1c, 0x18, 0x00],
+        [0x1c, 0x1e, 0x1c, 0x00],
+        [0x1e, 0x1f, 0x1e, 0x1f],
+    ],
+];
+
 /// Encoder for the single tile that spans the whole frame.
 pub(crate) struct FrameEncoder<'a> {
     planes: Vec<&'a [u16]>,
@@ -117,6 +137,9 @@ pub(crate) struct FrameEncoder<'a> {
     mi_skip: Vec<bool>,
     /// Y intra mode of the block covering each MI cell.
     mi_ymode: Vec<u8>,
+    /// AV1 AbovePartitionContext/LeftPartitionContext bitmasks (§5.11.4).
+    above_partition: Vec<u8>,
+    left_partition: Vec<u8>,
     /// Palette size of the block covering each MI cell (zero for no palette).
     mi_palette_size: Vec<u8>,
     /// Sorted luma palette colours of the block covering each MI cell.
@@ -251,6 +274,8 @@ impl<'a> FrameEncoder<'a> {
             mi_bsl: vec![0; mi_cols * mi_rows],
             mi_skip: vec![false; mi_cols * mi_rows],
             mi_ymode: vec![DC_PRED; mi_cols * mi_rows],
+            above_partition: vec![0; mi_cols],
+            left_partition: vec![0; mi_rows],
             mi_palette_size: vec![0; mi_cols * mi_rows],
             mi_palette_colors: vec![[0; 2]; mi_cols * mi_rows],
         }
@@ -298,12 +323,23 @@ impl<'a> FrameEncoder<'a> {
         let has_cols = c + half < self.mi_cols;
         let bsl = num4x4.trailing_zeros() as usize; // Mi_Width_Log2
 
-        let split = if bw < 8 {
-            false // PARTITION_NONE forced, no symbol
+        let partition = if bw < 8 {
+            0 // PARTITION_NONE forced, no symbol
+        } else if !self.monochrome
+            && self.subsampling_x == 0
+            && self.subsampling_y == 0
+            && (bw == 64 || bw == 32 || bw == 16 || bw == 8)
+            && has_rows
+            && has_cols
+            && !self.block_is_skippable(r, c, bw, DC_PRED)
+        {
+            let ctx = self.partition_ctx(r, c, bsl);
+            self.sym.encode_symbol(3, partition_cdf(bsl, ctx)); // split for per-block DC prediction
+            3
         } else if has_rows && has_cols {
             let ctx = self.partition_ctx(r, c, bsl);
             self.sym.encode_symbol(0, partition_cdf(bsl, ctx)); // PARTITION_NONE
-            false
+            0
         } else if has_cols {
             let ctx = self.partition_ctx(r, c, bsl);
             let partition = partition_cdf(bsl, ctx);
@@ -311,7 +347,7 @@ impl<'a> FrameEncoder<'a> {
             let cdf2 = split_or_horz_cdf(&current);
             self.sym
                 .encode_symbol_with_key(1, &cdf2, split_cdf_key(bsl, ctx, false)); // split
-            true
+            3
         } else if has_rows {
             let ctx = self.partition_ctx(r, c, bsl);
             let partition = partition_cdf(bsl, ctx);
@@ -319,12 +355,16 @@ impl<'a> FrameEncoder<'a> {
             let cdf2 = split_or_vert_cdf(&current);
             self.sym
                 .encode_symbol_with_key(1, &cdf2, split_cdf_key(bsl, ctx, true)); // split
-            true
+            3
         } else {
-            true // forced PARTITION_SPLIT, no symbol
+            3 // forced PARTITION_SPLIT, no symbol
         };
 
-        if !split {
+        if bw >= 8 && (partition != 3 || bsl == 1) {
+            self.update_partition_ctx(r, c, bsl, partition);
+        }
+
+        if partition == 0 {
             self.encode_block(r, c, bw);
         } else {
             let h = bw / 2;
@@ -336,9 +376,32 @@ impl<'a> FrameEncoder<'a> {
     }
 
     fn partition_ctx(&self, r: usize, c: usize, bsl: usize) -> usize {
-        let above = r > 0 && usize::from(self.mi_bsl[(r - 1) * self.mi_cols + c]) < bsl;
-        let left = c > 0 && usize::from(self.mi_bsl[r * self.mi_cols + (c - 1)]) < bsl;
+        // §8.3.2 reads bit `bsl - 1` from the partition context of the
+        // neighbour, rather than comparing the neighbour's terminal block
+        // size.  The distinction matters after a split partition.
+        let bit = bsl - 1;
+        let above = (self.above_partition[c] >> bit) & 1;
+        let left = if c > 0 {
+            (self.left_partition[r] >> bit) & 1
+        } else {
+            0
+        };
         usize::from(left) * 2 + usize::from(above)
+    }
+
+    fn update_partition_ctx(&mut self, r: usize, c: usize, bsl: usize, partition: usize) {
+        let block_level = 5 - bsl;
+        let n4 = 1usize << bsl;
+        let above = AL_PART_CTX[0][block_level][partition];
+        let left = AL_PART_CTX[1][block_level][partition];
+        for k in 0..n4 {
+            if c + k < self.mi_cols {
+                self.above_partition[c + k] = above;
+            }
+            if r + k < self.mi_rows {
+                self.left_partition[r + k] = left;
+            }
+        }
     }
 
     fn encode_block(&mut self, r: usize, c: usize, bw: usize) {
@@ -390,7 +453,11 @@ impl<'a> FrameEncoder<'a> {
             }
         }
 
-        if bw >= 8 && y_mode == DC_PRED {
+        // Palette syntax is present only when screen-content tools are enabled.
+        // The lossless color path keeps that frame-level flag off because this
+        // encoder never selects a chroma/luma palette for color planes; this
+        // avoids emitting a redundant has_palette=0 flag for every block.
+        if self.monochrome && bw >= 8 && y_mode == DC_PRED {
             let block_size_context = palette_block_size_context(bw);
             let palette_context = self.palette_context(r, c);
             let has_palette = palette.is_some();
@@ -491,6 +558,13 @@ impl<'a> FrameEncoder<'a> {
         // alignment rules; the directional search is enabled first for
         // full-resolution identity planes where the reference is direct.
         if self.subsampling_x != 0 || self.subsampling_y != 0 {
+            return DC_PRED;
+        }
+        // Recursive partition refinement terminates in DC-only 4×4 leaves.
+        // Directional references for split blocks need BlockDecoded/edge
+        // availability tracking; keep those leaves on the proven exact path
+        // until that state is implemented.
+        if !self.monochrome && self.subsampling_x == 0 && self.subsampling_y == 0 && bw <= 8 {
             return DC_PRED;
         }
         // Directional references over the coded-grid padding come from the
