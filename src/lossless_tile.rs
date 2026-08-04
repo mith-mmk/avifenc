@@ -113,6 +113,10 @@ const AL_PART_CTX: [[[u8; 4]; 5]; 2] = [
     ],
 ];
 
+/// Row stride for the superblock-local `BlockDecoded` map. The guarded range
+/// is `-1..=16` in both directions (§5.11.3).
+const BD_STRIDE: usize = 18;
+
 /// Encoder for the single tile that spans the whole frame.
 pub(crate) struct FrameEncoder<'a> {
     planes: Vec<&'a [u16]>,
@@ -140,6 +144,11 @@ pub(crate) struct FrameEncoder<'a> {
     /// AV1 AbovePartitionContext/LeftPartitionContext bitmasks (§5.11.4).
     above_partition: Vec<u8>,
     left_partition: Vec<u8>,
+    /// Superblock-local luma transform availability for directional edge
+    /// extension (§5.11.34).
+    sb_r: usize,
+    sb_c: usize,
+    block_decoded: Vec<u8>,
     /// Palette size of the block covering each MI cell (zero for no palette).
     mi_palette_size: Vec<u8>,
     /// Sorted luma palette colours of the block covering each MI cell.
@@ -276,6 +285,9 @@ impl<'a> FrameEncoder<'a> {
             mi_ymode: vec![DC_PRED; mi_cols * mi_rows],
             above_partition: vec![0; mi_cols],
             left_partition: vec![0; mi_rows],
+            sb_r: 0,
+            sb_c: 0,
+            block_decoded: vec![0; BD_STRIDE * BD_STRIDE],
             mi_palette_size: vec![0; mi_cols * mi_rows],
             mi_palette_colors: vec![[0; 2]; mi_cols * mi_rows],
         }
@@ -292,6 +304,9 @@ impl<'a> FrameEncoder<'a> {
             }
             let mut c = 0;
             while c < self.mi_cols {
+                self.sb_r = r;
+                self.sb_c = c;
+                self.clear_block_decoded(r, c);
                 self.encode_partition(r, c, 64);
                 c += SB4;
             }
@@ -328,7 +343,7 @@ impl<'a> FrameEncoder<'a> {
         } else if !self.monochrome
             && self.subsampling_x == 0
             && self.subsampling_y == 0
-            && (bw == 64 || bw == 32 || bw == 16 || bw == 8)
+            && bw == 64
             && has_rows
             && has_cols
             && !self.block_is_skippable(r, c, bw, DC_PRED)
@@ -400,6 +415,48 @@ impl<'a> FrameEncoder<'a> {
             }
             if r + k < self.mi_rows {
                 self.left_partition[r + k] = left;
+            }
+        }
+    }
+
+    /// Clears `BlockDecoded` for the current 64×64 superblock while retaining
+    /// the already reconstructed row above and column to the left.
+    fn clear_block_decoded(&mut self, r: usize, c: usize) {
+        const SB4: isize = 16;
+        let sb_width4 = (self.mi_cols - c).min(SB4 as usize) as isize;
+        let sb_height4 = (self.mi_rows - r).min(SB4 as usize) as isize;
+        for by in -1..=SB4 {
+            for bx in -1..=SB4 {
+                let above = by < 0 && r > 0 && bx >= 0 && bx < sb_width4;
+                let left = bx < 0 && c > 0 && by >= 0 && by < sb_height4;
+                self.block_decoded[(by + 1) as usize * BD_STRIDE + (bx + 1) as usize] =
+                    u8::from(above || left);
+            }
+        }
+        // The below-left guard is explicitly unavailable at a superblock edge.
+        self.block_decoded[(SB4 + 1) as usize * BD_STRIDE] = 0;
+    }
+
+    fn block_decoded_at(&self, by: isize, bx: isize) -> bool {
+        if !(-1..=16).contains(&by) || !(-1..=16).contains(&bx) {
+            return false;
+        }
+        self.block_decoded[(by + 1) as usize * BD_STRIDE + (bx + 1) as usize] != 0
+    }
+
+    fn mark_block_decoded_cell(&mut self, r: usize, c: usize) {
+        let by = r as isize - self.sb_r as isize;
+        let bx = c as isize - self.sb_c as isize;
+        if (0..16).contains(&by) && (0..16).contains(&bx) {
+            self.block_decoded[(by + 1) as usize * BD_STRIDE + (bx + 1) as usize] = 1;
+        }
+    }
+
+    fn mark_block_decoded(&mut self, r: usize, c: usize, bw: usize) {
+        let n4 = bw / 4;
+        for y in 0..n4 {
+            for x in 0..n4 {
+                self.mark_block_decoded_cell(r + y, c + x);
             }
         }
     }
@@ -495,6 +552,7 @@ impl<'a> FrameEncoder<'a> {
         }
 
         if skip {
+            self.mark_block_decoded(r, c, bw);
             self.clear_plane_contexts(r, c, bw);
             return;
         }
@@ -560,10 +618,9 @@ impl<'a> FrameEncoder<'a> {
         if self.subsampling_x != 0 || self.subsampling_y != 0 {
             return DC_PRED;
         }
-        // Recursive partition refinement terminates in DC-only 4×4 leaves.
-        // Directional references for split blocks need BlockDecoded/edge
-        // availability tracking; keep those leaves on the proven exact path
-        // until that state is implemented.
+        // 4×4 leaves stay on DC until their mode signalling is independently
+        // rate-modelled; larger 32×32 split leaves can use directional modes
+        // with the BlockDecoded edge map above.
         if !self.monochrome && self.subsampling_x == 0 && self.subsampling_y == 0 && bw <= 8 {
             return DC_PRED;
         }
@@ -578,19 +635,7 @@ impl<'a> FrameEncoder<'a> {
         }
         let mut best_mode = DC_PRED;
         let mut best_error = self.mode_cost(r, c, bw, DC_PRED);
-        let mut candidates = vec![
-            V_PRED,
-            H_PRED,
-            D45_PRED,
-            D135_PRED,
-            D113_PRED,
-            D157_PRED,
-            D67_PRED,
-            D203_PRED,
-            SMOOTH_PRED,
-            SMOOTH_V_PRED,
-            SMOOTH_H_PRED,
-        ];
+        let mut candidates = vec![V_PRED, H_PRED];
         let above_mode = if r > 0 {
             self.mi_ymode[(r - 1) * self.mi_cols + c]
         } else {
@@ -818,6 +863,9 @@ impl<'a> FrameEncoder<'a> {
                     continue;
                 }
                 self.transform_block(plane, px, py, bw, unit_w * unit_h, mode, sx, sy);
+                if plane == 0 {
+                    self.mark_block_decoded_cell(py >> 2, px >> 2);
+                }
             }
         }
     }
@@ -853,8 +901,8 @@ impl<'a> FrameEncoder<'a> {
         self.code_coeffs(plane, sx >> 2, sy >> 2, block_width, block_area, &quant);
     }
 
-    /// Lossless 4×4 prediction for the two cardinal directional modes.  The
-    /// fallback values match AV1's unavailable-edge reference construction:
+    /// Lossless 4×4 intra prediction. The fallback values match AV1's
+    /// unavailable-edge reference construction:
     /// above defaults to `2^(bd-1)-1`, left to `2^(bd-1)+1`, and the first
     /// available edge is replicated across the missing side.
     #[allow(clippy::too_many_arguments)]
@@ -864,13 +912,19 @@ impl<'a> FrameEncoder<'a> {
         sx: usize,
         sy: usize,
         mode: u8,
-        block_sx: usize,
-        block_sy: usize,
-        block_width: usize,
+        _block_sx: usize,
+        _block_sy: usize,
+        _block_width: usize,
     ) -> i32 {
         if mode == DC_PRED {
             return self.dc_avg(plane, sx & !3, sy & !3);
         }
+        // Intra prediction is evaluated independently for each 4×4 transform
+        // unit. The enclosing partition supplies the mode, but not the edge
+        // reference origin or the smooth-prediction width.
+        let block_sx = sx & !3;
+        let block_sy = sy & !3;
+        let block_width = 4;
         let mid = 1 << (self.bit_depth - 1);
         let x_offset = sx - block_sx;
         let y_offset = sy - block_sy;
@@ -891,37 +945,7 @@ impl<'a> FrameEncoder<'a> {
         match mode {
             V_PRED => above,
             H_PRED => left,
-            D45_PRED | D67_PRED => {
-                let derivative = if mode == D45_PRED { 64 } else { 27 };
-                directional_zone_one(
-                    &self.reference_above(plane, block_sx, block_sy, block_sx + block_width),
-                    x_offset,
-                    y_offset,
-                    derivative,
-                )
-            }
-            D203_PRED => directional_zone_three(
-                &self.reference_left(plane, block_sx, block_sy, block_sy + block_width),
-                x_offset,
-                y_offset,
-                27,
-            ),
-            D135_PRED | D113_PRED | D157_PRED => {
-                let (dx, dy) = match mode {
-                    D135_PRED => (64, 64),
-                    D113_PRED => (27, 151),
-                    _ => (151, 27),
-                };
-                directional_zone_two(
-                    &self.reference_above(plane, block_sx, block_sy, block_sx + block_width),
-                    &self.reference_left(plane, block_sx, block_sy, block_sy + block_width),
-                    self.reference_top_left(plane, block_sx, block_sy),
-                    x_offset,
-                    y_offset,
-                    dx,
-                    dy,
-                )
-            }
+            D45_PRED..=D67_PRED => self.predict_directional_sample(plane, sx, sy, mode),
             SMOOTH_PRED | SMOOTH_V_PRED | SMOOTH_H_PRED => {
                 let above_ref =
                     self.reference_above(plane, block_sx, block_sy, block_sx + block_width);
@@ -976,6 +1000,68 @@ impl<'a> FrameEncoder<'a> {
         }
     }
 
+    /// Predicts one sample of a directional 4×4 transform. In AV1, a block
+    /// mode is reused by each transform in a partition, but its directional
+    /// references are constructed at that transform's own origin.
+    fn predict_directional_sample(&self, plane: usize, sx: usize, sy: usize, mode: u8) -> i32 {
+        let above = self.reference_above(plane, sx, sy, sx + 4);
+        let left = self.reference_left(plane, sx, sy, sy + 4);
+        let top_left = self.reference_top_left(plane, sx, sy);
+        let x = sx & 3;
+        let y = sy & 3;
+        let i = y as i32;
+        let j = x as i32;
+        let angle = cdf::MODE_TO_ANGLE[mode as usize];
+        let interpolate = |a: i32, b: i32, shift: i32| (a * (32 - shift) + b * shift + 16) >> 5;
+        let above_at = |index: i32| {
+            if index < 0 {
+                top_left
+            } else {
+                above[index as usize]
+            }
+        };
+        let left_at = |index: i32| {
+            if index < 0 {
+                top_left
+            } else {
+                left[index as usize]
+            }
+        };
+        match angle {
+            90 => above[x],
+            180 => left[y],
+            angle if angle < 90 => {
+                let derivative = cdf::DR_INTRA_DERIVATIVE[angle as usize];
+                let index = (i + 1) * derivative;
+                let base = (index >> 6) + j;
+                let shift = (index >> 1) & 31;
+                interpolate(above[base as usize], above[(base + 1) as usize], shift)
+            }
+            angle if angle < 180 => {
+                let dx = cdf::DR_INTRA_DERIVATIVE[(180 - angle) as usize];
+                let dy = cdf::DR_INTRA_DERIVATIVE[(angle - 90) as usize];
+                let index = (j << 6) - (i + 1) * dx;
+                let base = index >> 6;
+                if base >= -1 {
+                    let shift = (index >> 1) & 31;
+                    interpolate(above_at(base), above_at(base + 1), shift)
+                } else {
+                    let index = (i << 6) - (j + 1) * dy;
+                    let base = index >> 6;
+                    let shift = (index >> 1) & 31;
+                    interpolate(left_at(base), left_at(base + 1), shift)
+                }
+            }
+            _ => {
+                let derivative = cdf::DR_INTRA_DERIVATIVE[(270 - angle) as usize];
+                let index = (j + 1) * derivative;
+                let base = (index >> 6) + i;
+                let shift = (index >> 1) & 31;
+                interpolate(left[base as usize], left[(base + 1) as usize], shift)
+            }
+        }
+    }
+
     fn reference_above(
         &self,
         plane: usize,
@@ -985,9 +1071,14 @@ impl<'a> FrameEncoder<'a> {
     ) -> Vec<i32> {
         let n = block_end_x - block_sx;
         let fallback = 1 << (self.bit_depth - 1);
+        let by = block_sy / 4 - self.sb_r;
+        let bx = block_sx / 4 - self.sb_c;
+        let have_above_right =
+            self.block_decoded_at(by as isize - 1, bx as isize + (n / 4) as isize);
         if block_sy > 0 {
+            let available = if have_above_right { 2 * n } else { n };
             (0..2 * n + 1)
-                .map(|x| self.sample(plane, block_sx + x, block_sy - 1))
+                .map(|x| self.sample(plane, block_sx + x.min(available - 1), block_sy - 1))
                 .collect()
         } else if block_sx > 0 {
             vec![self.sample(plane, block_sx - 1, block_sy); 2 * n + 1]
@@ -1005,9 +1096,14 @@ impl<'a> FrameEncoder<'a> {
     ) -> Vec<i32> {
         let n = block_end_y - block_sy;
         let fallback = 1 << (self.bit_depth - 1);
+        let by = block_sy / 4 - self.sb_r;
+        let bx = block_sx / 4 - self.sb_c;
+        let have_below_left =
+            self.block_decoded_at(by as isize + (n / 4) as isize, bx as isize - 1);
         if block_sx > 0 {
+            let available = if have_below_left { 2 * n } else { n };
             (0..2 * n + 1)
-                .map(|y| self.sample(plane, block_sx - 1, block_sy + y))
+                .map(|y| self.sample(plane, block_sx - 1, block_sy + y.min(available - 1)))
                 .collect()
         } else if block_sy > 0 {
             vec![self.sample(plane, block_sx, block_sy - 1); 2 * n + 1]
@@ -1328,68 +1424,6 @@ fn angle_delta_cdf(mode: u8) -> &'static [u16; 7] {
         D203_PRED => &cdf::ANGLE_DELTA_D203,
         D67_PRED => &cdf::ANGLE_DELTA_D67,
         _ => unreachable!("angle delta is only signalled for directional modes"),
-    }
-}
-
-fn interpolate(a: i32, b: i32, shift: i32) -> i32 {
-    (a * (32 - shift) + b * shift + 16) >> 5
-}
-
-fn directional_zone_one(reference: &[i32], x: usize, y: usize, derivative: i32) -> i32 {
-    let index = (y as i32 + 1) * derivative;
-    let max_base = reference.len().saturating_sub(2);
-    let base = ((index >> 6) as usize + x).min(max_base);
-    interpolate(
-        reference[base],
-        reference[(base + 1).min(max_base)],
-        (index >> 1) & 31,
-    )
-}
-
-fn directional_zone_three(reference: &[i32], x: usize, y: usize, derivative: i32) -> i32 {
-    let index = (x as i32 + 1) * derivative;
-    let max_base = reference.len().saturating_sub(2);
-    let base = ((index >> 6) as usize + y).min(max_base);
-    interpolate(
-        reference[reference.len() - 1 - base],
-        reference[reference.len() - 1 - (base + 1).min(max_base)],
-        (index >> 1) & 31,
-    )
-}
-
-fn directional_zone_two(
-    above: &[i32],
-    left: &[i32],
-    top_left: i32,
-    x: usize,
-    y: usize,
-    dx: i32,
-    dy: i32,
-) -> i32 {
-    let index = (x as i32) * 64 - (y as i32 + 1) * dx;
-    let base = index >> 6;
-    if base >= -1 {
-        let shift = (index >> 1) & 31;
-        let edge_len = above.len() / 2;
-        let base = (base.max(0) as usize).min(edge_len.saturating_sub(2));
-        let a0 = if index < 0 { top_left } else { above[base] };
-        interpolate(a0, above[(base + 1).min(edge_len.saturating_sub(1))], shift)
-    } else {
-        let index = (y as i32) * 64 - (x as i32 + 1) * dy;
-        let base = index >> 6;
-        let shift = (index >> 1) & 31;
-        let edge_len = left.len() / 2;
-        let base = (base.max(0) as usize).min(edge_len.saturating_sub(2));
-        let a0 = if index < 0 {
-            top_left
-        } else {
-            left[left.len() - 1 - base]
-        };
-        interpolate(
-            a0,
-            left[left.len() - 1 - (base + 1).min(edge_len.saturating_sub(1))],
-            shift,
-        )
     }
 }
 
