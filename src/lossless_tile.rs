@@ -370,6 +370,8 @@ impl<'a> FrameEncoder<'a> {
         let y_mode_cdf = intra_frame_y_mode_cdf(above_context, left_context);
         self.sym.encode_symbol(usize::from(y_mode), y_mode_cdf);
         if bw >= 8 && is_directional_mode(y_mode) {
+            // AV1 codes angle_delta in the order -3..=3, so symbol 3 is the
+            // zero-angle default used by the predictor below.
             self.sym.encode_symbol(3, angle_delta_cdf(y_mode));
         }
         let chroma_reference = !self.monochrome && self.is_chroma_reference(r, c, bw);
@@ -501,8 +503,20 @@ impl<'a> FrameEncoder<'a> {
             return DC_PRED;
         }
         let mut best_mode = DC_PRED;
-        let mut best_error = self.mode_error(r, c, bw, DC_PRED);
-        let mut candidates = vec![V_PRED, H_PRED];
+        let mut best_error = self.mode_cost(r, c, bw, DC_PRED);
+        let mut candidates = vec![
+            V_PRED,
+            H_PRED,
+            D45_PRED,
+            D135_PRED,
+            D113_PRED,
+            D157_PRED,
+            D67_PRED,
+            D203_PRED,
+            SMOOTH_PRED,
+            SMOOTH_V_PRED,
+            SMOOTH_H_PRED,
+        ];
         let above_mode = if r > 0 {
             self.mi_ymode[(r - 1) * self.mi_cols + c]
         } else {
@@ -517,7 +531,7 @@ impl<'a> FrameEncoder<'a> {
             candidates.push(PAETH_PRED);
         }
         for mode in candidates {
-            let error = self.mode_error(r, c, bw, mode);
+            let error = self.mode_cost(r, c, bw, mode);
             if error < best_error {
                 best_mode = mode;
                 best_error = error;
@@ -526,19 +540,30 @@ impl<'a> FrameEncoder<'a> {
         best_mode
     }
 
-    fn mode_error(&self, r: usize, c: usize, bw: usize, mode: u8) -> u64 {
+    fn mode_cost(&self, r: usize, c: usize, bw: usize, mode: u8) -> u64 {
         let sx = c * 4;
         let sy = r * 4;
-        let mut error = 0u64;
-        for y in 0..bw {
-            for x in 0..bw {
-                error += self
-                    .sample(0, sx + x, sy + y)
-                    .abs_diff(self.predict_block_sample(0, sx + x, sy + y, mode, sx, sy, bw))
-                    as u64;
+        let mut cost = 0u64;
+        for ty in 0..(bw / 4) {
+            for tx in 0..(bw / 4) {
+                let mut residual = [0i32; 16];
+                for y in 0..4 {
+                    for x in 0..4 {
+                        let px = sx + tx * 4 + x;
+                        let py = sy + ty * 4 + y;
+                        residual[y * 4 + x] = self.sample(0, px, py)
+                            - self.predict_block_sample(0, px, py, mode, sx, sy, bw);
+                    }
+                }
+                for coefficient in gamut_dsp::fwht4x4(&residual) {
+                    let level = u64::from(coefficient.unsigned_abs());
+                    if level != 0 {
+                        cost += 8 + level.min(64);
+                    }
+                }
             }
         }
-        error
+        cost
     }
 
     /// Selects the deliberately narrow palette path: monochrome blocks with
@@ -832,12 +857,23 @@ impl<'a> FrameEncoder<'a> {
                 let bottom_left = left_ref[block_width - 1];
                 let wx = smooth_weight(block_width, x_offset);
                 let wy = smooth_weight(block_width, y_offset);
-                let smooth_v = (wy * above_ref[x_offset] + (256 - wy) * bottom_left + 128) >> 8;
-                let smooth_h = (wx * left_ref[y_offset] + (256 - wx) * top_right + 128) >> 8;
                 match mode {
-                    SMOOTH_V_PRED => smooth_v,
-                    SMOOTH_H_PRED => smooth_h,
-                    _ => (smooth_v + smooth_h + 1) >> 1,
+                    SMOOTH_V_PRED => {
+                        (wy * above_ref[x_offset] + (256 - wy) * bottom_left + 128) >> 8
+                    }
+                    SMOOTH_H_PRED => {
+                        let left = left_ref[block_width - 1 - y_offset];
+                        (wx * left + (256 - wx) * top_right + 128) >> 8
+                    }
+                    _ => {
+                        let left = left_ref[block_width - 1 - y_offset];
+                        (wy * above_ref[x_offset]
+                            + (256 - wy) * bottom_left
+                            + wx * left
+                            + (256 - wx) * top_right
+                            + 256)
+                            >> 9
+                    }
                 }
             }
             PAETH_PRED => {
@@ -1227,14 +1263,24 @@ fn interpolate(a: i32, b: i32, shift: i32) -> i32 {
 
 fn directional_zone_one(reference: &[i32], x: usize, y: usize, derivative: i32) -> i32 {
     let index = (y as i32 + 1) * derivative;
-    let base = (index >> 6) as usize + x;
-    interpolate(reference[base], reference[base + 1], (index >> 1) & 31)
+    let max_base = reference.len().saturating_sub(2);
+    let base = ((index >> 6) as usize + x).min(max_base);
+    interpolate(
+        reference[base],
+        reference[(base + 1).min(max_base)],
+        (index >> 1) & 31,
+    )
 }
 
 fn directional_zone_three(reference: &[i32], x: usize, y: usize, derivative: i32) -> i32 {
     let index = (x as i32 + 1) * derivative;
-    let base = (index >> 6) as usize + y;
-    interpolate(reference[base], reference[base + 1], (index >> 1) & 31)
+    let max_base = reference.len().saturating_sub(2);
+    let base = ((index >> 6) as usize + y).min(max_base);
+    interpolate(
+        reference[reference.len() - 1 - base],
+        reference[reference.len() - 1 - (base + 1).min(max_base)],
+        (index >> 1) & 31,
+    )
 }
 
 fn directional_zone_two(
@@ -1250,22 +1296,26 @@ fn directional_zone_two(
     let base = index >> 6;
     if base >= -1 {
         let shift = (index >> 1) & 31;
-        let a0 = if base < 0 {
-            top_left
-        } else {
-            above[base as usize]
-        };
-        interpolate(a0, above[(base + 1) as usize], shift)
+        let edge_len = above.len() / 2;
+        let base = (base.max(0) as usize).min(edge_len.saturating_sub(2));
+        let a0 = if index < 0 { top_left } else { above[base] };
+        interpolate(a0, above[(base + 1).min(edge_len.saturating_sub(1))], shift)
     } else {
         let index = (y as i32) * 64 - (x as i32 + 1) * dy;
         let base = index >> 6;
         let shift = (index >> 1) & 31;
-        let a0 = if base < 0 {
+        let edge_len = left.len() / 2;
+        let base = (base.max(0) as usize).min(edge_len.saturating_sub(2));
+        let a0 = if index < 0 {
             top_left
         } else {
-            left[base as usize]
+            left[left.len() - 1 - base]
         };
-        interpolate(a0, left[(base + 1) as usize], shift)
+        interpolate(
+            a0,
+            left[left.len() - 1 - (base + 1).min(edge_len.saturating_sub(1))],
+            shift,
+        )
     }
 }
 
