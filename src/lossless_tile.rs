@@ -41,6 +41,8 @@ impl Hasher for CdfKeyHasher {
 }
 
 const MAX_ADAPTIVE_CDF_LEN: usize = 16;
+const MAX_BLOCK_DECODED_CELLS: usize = 16 * 16;
+const BLOCK_DECODED_SNAPSHOT_WORDS: usize = MAX_BLOCK_DECODED_CELLS / u64::BITS as usize;
 
 #[derive(Clone)]
 struct AdaptiveCdfState {
@@ -564,7 +566,11 @@ struct PlaneReconstructionSnapshot {
     y: usize,
     width: usize,
     samples: Vec<u16>,
-    block_decoded: Vec<(usize, u8)>,
+    block_decoded_x4: usize,
+    block_decoded_y4: usize,
+    block_decoded_width4: usize,
+    block_decoded_height4: usize,
+    block_decoded: [u64; BLOCK_DECODED_SNAPSHOT_WORDS],
 }
 
 #[derive(Clone, Copy)]
@@ -1706,16 +1712,21 @@ impl<'a> FrameEncoder<'a> {
                     samples
                         .extend_from_slice(&self.reconstructed[plane][start..start + region.width]);
                 }
-                let mut block_decoded = Vec::with_capacity(region.width4 * region.height4);
+                let block_decoded_x4 = region.x >> 2;
+                let block_decoded_y4 = region.y >> 2;
+                let mut block_decoded = [0; BLOCK_DECODED_SNAPSHOT_WORDS];
                 for y in 0..region.height4 {
                     for x in 0..region.width4 {
-                        let cell_r = (region.y >> 2) + y;
-                        let cell_c = (region.x >> 2) + x;
+                        let cell_r = block_decoded_y4 + y;
+                        let cell_c = block_decoded_x4 + x;
                         let by = cell_r as isize - self.sb_r as isize;
                         let bx = cell_c as isize - self.sb_c as isize;
                         if (0..16).contains(&by) && (0..16).contains(&bx) {
                             let index = (by + 1) as usize * BD_STRIDE + (bx + 1) as usize;
-                            block_decoded.push((index, self.block_decoded[plane][index]));
+                            let bit = y * 16 + x;
+                            block_decoded[bit / u64::BITS as usize] |=
+                                u64::from(self.block_decoded[plane][index])
+                                    << (bit % u64::BITS as usize);
                         }
                     }
                 }
@@ -1724,6 +1735,10 @@ impl<'a> FrameEncoder<'a> {
                     y: region.y,
                     width: region.width,
                     samples,
+                    block_decoded_x4,
+                    block_decoded_y4,
+                    block_decoded_width4: region.width4,
+                    block_decoded_height4: region.height4,
                     block_decoded,
                 }
             })
@@ -1741,8 +1756,21 @@ impl<'a> FrameEncoder<'a> {
         plane: usize,
         snapshot: PlaneReconstructionSnapshot,
     ) {
-        for (index, value) in snapshot.block_decoded {
-            self.block_decoded[plane][index] = value;
+        for y in 0..snapshot.block_decoded_height4 {
+            for x in 0..snapshot.block_decoded_width4 {
+                let cell_r = snapshot.block_decoded_y4 + y;
+                let cell_c = snapshot.block_decoded_x4 + x;
+                let by = cell_r as isize - self.sb_r as isize;
+                let bx = cell_c as isize - self.sb_c as isize;
+                if (0..16).contains(&by) && (0..16).contains(&bx) {
+                    let index = (by + 1) as usize * BD_STRIDE + (bx + 1) as usize;
+                    let bit = y * 16 + x;
+                    self.block_decoded[plane][index] = ((snapshot.block_decoded
+                        [bit / u64::BITS as usize]
+                        >> (bit % u64::BITS as usize))
+                        & 1) as u8;
+                }
+            }
         }
         let coded_width = self.plane_coded_widths[plane];
         if snapshot.width > 0 {
