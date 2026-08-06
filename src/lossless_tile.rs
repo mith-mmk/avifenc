@@ -2227,18 +2227,23 @@ impl<'a> FrameEncoder<'a> {
         let sx = (c * 4) >> self.subsampling_x;
         let sy = (r * 4) >> self.subsampling_y;
         let luma_deltas = self.cfl_luma_deltas(sx, sy);
+        // The chroma DC predictor depends only on the plane and block edges.
+        // Hoist its eight-sample boundary scan out of both the 33-alpha search
+        // and the 16-sample residual loop.
+        let base_u = self.dc_avg(1, sx & !3, sy & !3);
+        let base_v = self.dc_avg(2, sx & !3, sy & !3);
         let best_u = (-16i8..=16)
-            .min_by_key(|&alpha| self.cfl_mode_cost(1, sx, sy, alpha, &luma_deltas))
+            .min_by_key(|&alpha| self.cfl_mode_cost(1, sx, sy, alpha, &luma_deltas, base_u))
             .unwrap_or(0);
         let best_v = (-16i8..=16)
-            .min_by_key(|&alpha| self.cfl_mode_cost(2, sx, sy, alpha, &luma_deltas))
+            .min_by_key(|&alpha| self.cfl_mode_cost(2, sx, sy, alpha, &luma_deltas, base_v))
             .unwrap_or(0);
         if best_u == 0 && best_v == 0 {
             return None;
         }
         let cfl_cost = self
-            .cfl_mode_cost(1, sx, sy, best_u, &luma_deltas)
-            .saturating_add(self.cfl_mode_cost(2, sx, sy, best_v, &luma_deltas));
+            .cfl_mode_cost(1, sx, sy, best_u, &luma_deltas, base_u)
+            .saturating_add(self.cfl_mode_cost(2, sx, sy, best_v, &luma_deltas, base_v));
         (cfl_cost < normal_cost).then_some((best_u, best_v))
     }
 
@@ -2249,13 +2254,14 @@ impl<'a> FrameEncoder<'a> {
         sy: usize,
         alpha_q3: i8,
         luma_deltas: &[i32; 16],
+        base: i32,
     ) -> u64 {
         let mut residual = [0i32; 16];
         for y in 0..4 {
             for x in 0..4 {
                 let index = y * 4 + x;
                 residual[index] = self.sample(plane, sx + x, sy + y)
-                    - self.predict_cfl_sample(plane, sx + x, sy + y, alpha_q3, luma_deltas);
+                    - self.predict_cfl_sample(base, alpha_q3, luma_deltas[index]);
             }
         }
         gamut_dsp::fwht4x4(&residual)
@@ -2323,20 +2329,8 @@ impl<'a> FrameEncoder<'a> {
         deltas
     }
 
-    fn predict_cfl_sample(
-        &self,
-        plane: usize,
-        sx: usize,
-        sy: usize,
-        alpha_q3: i8,
-        luma_deltas: &[i32; 16],
-    ) -> i32 {
-        debug_assert!(plane > 0);
-        let block_sx = sx & !3;
-        let block_sy = sy & !3;
-        let base = self.dc_avg(plane, block_sx, block_sy);
-        let value_sum = luma_deltas[(sy - block_sy) * 4 + sx - block_sx];
-        let scaled = round_power_of_two_signed(i32::from(alpha_q3) * value_sum, 6);
+    fn predict_cfl_sample(&self, base: i32, alpha_q3: i8, luma_delta: i32) -> i32 {
+        let scaled = round_power_of_two_signed(i32::from(alpha_q3) * luma_delta, 6);
         (base + scaled).clamp(0, (1i32 << self.bit_depth) - 1)
     }
 
@@ -2799,21 +2793,23 @@ impl<'a> FrameEncoder<'a> {
         cfl_alpha_q3: Option<i8>,
     ) {
         let mut res = [0i32; 16];
-        let cfl_luma_deltas = cfl_alpha_q3.map(|_| self.cfl_luma_deltas(sx, sy));
+        let cfl_prediction = cfl_alpha_q3.map(|alpha_q3| {
+            debug_assert!(plane > 0);
+            debug_assert!(sx.is_multiple_of(4) && sy.is_multiple_of(4));
+            (
+                alpha_q3,
+                self.cfl_luma_deltas(sx, sy),
+                self.dc_avg(plane, sx, sy),
+            )
+        });
         let predictions = cfl_alpha_q3
             .is_none()
             .then(|| self.predict_block_4x4(plane, sx, sy, mode, angle_delta));
         for i in 0..4 {
             for j in 0..4 {
                 let sample = self.sample(plane, sx + j, sy + i);
-                let prediction = if let Some(alpha_q3) = cfl_alpha_q3 {
-                    self.predict_cfl_sample(
-                        plane,
-                        sx + j,
-                        sy + i,
-                        alpha_q3,
-                        cfl_luma_deltas.as_ref().expect("CFL luma deltas"),
-                    )
+                let prediction = if let Some((alpha_q3, luma_deltas, base)) = &cfl_prediction {
+                    self.predict_cfl_sample(*base, *alpha_q3, luma_deltas[i * 4 + j])
                 } else {
                     predictions.as_ref().expect("intra predictions")[i * 4 + j]
                 };
@@ -3560,6 +3556,31 @@ mod tests {
         let mut unlikely = RateEstimator::new();
         unlikely.encode_symbol(3, &SKEWED_CDF);
         assert!(likely.rate_q10() < unlikely.rate_q10());
+    }
+
+    #[test]
+    fn cfl_prediction_from_precomputed_base_preserves_rounding_and_clamping() {
+        let samples = vec![0u16; 64];
+        let planes = LosslessPlanes {
+            width: 8,
+            height: 8,
+            bit_depth: 8,
+            monochrome: true,
+            subsampling_x: 0,
+            subsampling_y: 0,
+            color_primaries: 1,
+            transfer_characteristics: 13,
+            matrix_coefficients: 0,
+            full_range: true,
+            planes: vec![&samples],
+        };
+        let encoder = FrameEncoder::new(&planes, true);
+
+        let predicted =
+            [-512, -257, -4, 0, 4, 255, 512].map(|delta| encoder.predict_cfl_sample(128, 8, delta));
+        assert_eq!(predicted, [64, 96, 127, 128, 129, 160, 192]);
+        assert_eq!(encoder.predict_cfl_sample(4, 16, -512), 0);
+        assert_eq!(encoder.predict_cfl_sample(250, 16, 512), 255);
     }
 
     #[test]
