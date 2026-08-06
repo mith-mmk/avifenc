@@ -9,6 +9,8 @@ use crate::container::write_avif;
 use crate::error::EncoderError;
 use crate::lossless_backend::encode_still_lossless;
 use crate::lossless_types::LosslessPlanes;
+use crate::profile;
+use crate::profile::{Guard, Kind};
 use crate::{FrameBuffers, ImageBuffer, PixelInformation, PlaneBuffer, Rgba16ImageBuffer};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -78,12 +80,14 @@ pub fn encode_bytes(
     validate_options(options)?;
     validate_pixel_information(options, 3, Some(8))?;
     if color_lossless_requested(options) || alpha_lossless_requested(options) {
-        return encode_rgba8_with_lossless_items(
+        let result = encode_rgba8_with_lossless_items(
             image,
             options,
             color_lossless_requested(options),
             alpha_lossless_requested(options),
         );
+        profile::report();
+        return result;
     }
     let grayscale = rgba8_is_grayscale(image);
     let (primary, alpha, channels) = if grayscale {
@@ -134,13 +138,15 @@ pub fn encode_bytes(
         (primary, alpha, 3)
     };
     let effective = effective_image_options(options, channels, 8);
-    write_avif(
+    let result = write_avif(
         image.width,
         image.height,
         &primary,
         alpha.as_ref(),
         &effective,
-    )
+    );
+    profile::report();
+    result
 }
 
 /// Encodes native YUV planes into an AVIF still image.
@@ -408,6 +414,7 @@ fn encode_planes_with_prediction(
     options: &EncoderOptions,
     complete_keyframe_search: bool,
 ) -> Result<EncodedFrame, EncoderError> {
+    let _timing = Guard::new(Kind::Rav1eEncode);
     let chroma_sampling = match sampling {
         Sampling::Cs400 => ChromaSampling::Cs400,
         Sampling::Cs420 => ChromaSampling::Cs420,
@@ -1494,6 +1501,7 @@ fn rgba16_to_gray(image: &Rgba16ImageBuffer, bit_depth: u8) -> (Vec<u16>, Option
 }
 
 fn rgba_to_yuv420(image: &ImageBuffer) -> (Vec<u16>, Vec<u16>, Vec<u16>, Option<Vec<u16>>) {
+    let _timing = Guard::new(Kind::RgbaToYuv);
     let chroma_width = chroma_width(image.width);
     let chroma_height = chroma_height(image.height);
     let mut y = vec![0u16; image.width * image.height];
@@ -1541,6 +1549,7 @@ fn rgba16_to_yuv420(
     image: &Rgba16ImageBuffer,
     bit_depth: u8,
 ) -> (Vec<u16>, Vec<u16>, Vec<u16>, Option<Vec<u16>>) {
+    let _timing = Guard::new(Kind::RgbaToYuv);
     let max = (1u32 << u32::from(bit_depth)) - 1;
     let chroma_width = chroma_width(image.width);
     let chroma_height = chroma_height(image.height);

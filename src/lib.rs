@@ -15,6 +15,7 @@ mod lossless_cdf;
 mod lossless_headers;
 mod lossless_tile;
 mod lossless_types;
+mod profile;
 
 pub use compat::{
     CallbackResponse, DataMap, EncodeOptions, EncoderOptions, ImageInformation, Metadata,

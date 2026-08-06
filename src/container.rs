@@ -1,5 +1,6 @@
 use crate::encoder::EncodedFrame;
 use crate::error::EncoderError;
+use crate::profile::{Guard, Kind};
 use crate::{ColorInformation, EncoderOptions, PixelInformation};
 
 const PRIMARY_ITEM_ID: u16 = 1;
@@ -24,6 +25,7 @@ pub(crate) fn write_avif(
     alpha: Option<&EncodedFrame>,
     options: &EncoderOptions,
 ) -> Result<Vec<u8>, EncoderError> {
+    let _timing = Guard::new(Kind::Container);
     let width = u32::try_from(width)
         .map_err(|_| EncoderError::InvalidParam("image width exceeds u32".to_string()))?;
     let height = u32::try_from(height)

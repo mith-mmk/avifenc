@@ -12,6 +12,7 @@ repository = "https://github.com/mith-mmk/avifenc-rust.git"
 [features]
 default = []
 multithread = ["rav1e/threading"]
+profile = []
 
 [dependencies]
 gamut-bitstream = "=0.2.1"

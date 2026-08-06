@@ -11,6 +11,7 @@
 
 use crate::lossless_cdf as cdf;
 use crate::lossless_types::LosslessPlanes;
+use crate::profile::{Guard, Kind};
 use gamut_bitstream::SymbolEncoder as RangeEncoder;
 use std::collections::HashMap;
 use std::hash::{BuildHasherDefault, Hasher};
@@ -49,6 +50,7 @@ struct AdaptiveCdfState {
     values: [u16; MAX_ADAPTIVE_CDF_LEN],
     len: u8,
     count: u16,
+    journal_epoch: u64,
 }
 
 impl AdaptiveCdfState {
@@ -63,6 +65,7 @@ impl AdaptiveCdfState {
             values,
             len: cdf.len() as u8,
             count: 0,
+            journal_epoch: 0,
         }
     }
 
@@ -193,6 +196,22 @@ struct AdaptiveSymbolEncoder {
     inner: Option<RangeEncoder>,
     cdfs: CdfMap,
     rate: RateEstimator,
+    cdf_journal: Vec<CdfUndo>,
+    probe_epoch: Option<u64>,
+    next_probe_epoch: u64,
+}
+
+#[derive(Clone)]
+struct CdfUndo {
+    key: usize,
+    previous: Option<AdaptiveCdfState>,
+}
+
+struct ProbeCheckpoint {
+    rate: RateEstimator,
+    inner: Option<RangeEncoder>,
+    journal_len: usize,
+    previous_epoch: Option<u64>,
 }
 
 impl AdaptiveSymbolEncoder {
@@ -201,6 +220,9 @@ impl AdaptiveSymbolEncoder {
             inner: Some(RangeEncoder::new()),
             cdfs: CdfMap::default(),
             rate: RateEstimator::new(),
+            cdf_journal: Vec::new(),
+            probe_epoch: None,
+            next_probe_epoch: 1,
         }
     }
 
@@ -209,10 +231,32 @@ impl AdaptiveSymbolEncoder {
     }
 
     fn encode_symbol_with_key(&mut self, symbol: usize, cdf: &[u16], key: usize) {
-        let state = self
-            .cdfs
-            .entry(key)
-            .or_insert_with(|| AdaptiveCdfState::new(cdf));
+        let state = if let Some(epoch) = self.probe_epoch {
+            use std::collections::hash_map::Entry;
+            match self.cdfs.entry(key) {
+                Entry::Occupied(mut entry) => {
+                    if entry.get().journal_epoch != epoch {
+                        self.cdf_journal.push(CdfUndo {
+                            key,
+                            previous: Some(entry.get().clone()),
+                        });
+                        entry.get_mut().journal_epoch = epoch;
+                    }
+                    entry.into_mut()
+                }
+                Entry::Vacant(entry) => {
+                    self.cdf_journal.push(CdfUndo {
+                        key,
+                        previous: None,
+                    });
+                    entry.insert(AdaptiveCdfState::new(cdf))
+                }
+            }
+        } else {
+            self.cdfs
+                .entry(key)
+                .or_insert_with(|| AdaptiveCdfState::new(cdf))
+        };
         self.rate.encode_symbol(symbol, state.values());
         let mut count = state.count;
         if let Some(inner) = self.inner.as_mut() {
@@ -507,9 +551,6 @@ pub(crate) struct FrameEncoder<'a> {
     mi_uv_palette_colors: Vec<[u16; 8]>,
     uv_palette_content: bool,
     screen_content_tools: bool,
-    /// Reusable CDF maps for RDO probes. Keeping the bucket allocation alive
-    /// avoids a fresh hash-table allocation for every candidate measurement.
-    probe_cdf_pool: Vec<CdfMap>,
 }
 
 type MiContext = (usize, u8, bool, u8, u8, [u16; 8], u8, [u16; 8]);
@@ -742,12 +783,12 @@ impl<'a> FrameEncoder<'a> {
             mi_uv_palette_colors: vec![[0; 8]; mi_cols * mi_rows],
             uv_palette_content,
             screen_content_tools,
-            probe_cdf_pool: Vec::new(),
         }
     }
 
     /// Encodes the tile and returns the symbol-coded bytes (`decode_tile`, §5.11.2).
     pub(crate) fn encode(mut self) -> Vec<u8> {
+        let _timing = Guard::new(Kind::Frame);
         const SB4: usize = 16; // 64×64 superblock in MI units
         // Monochrome planes (including the auxiliary alpha item) have no
         // chroma partition work, so the deeper generic partition RDO is
@@ -868,6 +909,7 @@ impl<'a> FrameEncoder<'a> {
     }
 
     fn encode_partition_rdo(&mut self, r: usize, c: usize, bw: usize, rdo_depth: u8) {
+        let _timing = Guard::new(Kind::PartitionRdo);
         let num4x4 = bw / 4;
         let half = num4x4 >> 1;
         let has_rows = r + half < self.mi_rows;
@@ -1285,6 +1327,7 @@ impl<'a> FrameEncoder<'a> {
         uv_angle_delta: i8,
         cfl: Option<(i8, i8)>,
     ) {
+        let _timing = Guard::new(Kind::BlockEncode);
         let n4_x = bw / 4;
         let n4_y = bh / 4;
         let bsl = n4_x.trailing_zeros() as u8;
@@ -1572,6 +1615,7 @@ impl<'a> FrameEncoder<'a> {
     }
 
     fn snapshot_block_context(&self, r: usize, c: usize, bw: usize) -> BlockContextSnapshot {
+        let _timing = Guard::new(Kind::Snapshot);
         let n4 = bw / 4;
         let reconstructions = self.snapshot_reconstruction_context(r, c, bw, bw);
         let planes = reconstructions
@@ -1629,6 +1673,7 @@ impl<'a> FrameEncoder<'a> {
     }
 
     fn restore_block_context(&mut self, snapshot: BlockContextSnapshot) {
+        let _timing = Guard::new(Kind::Restore);
         for (plane, saved) in snapshot.planes.into_iter().enumerate() {
             let above_end = saved.above_start + saved.above_level.len();
             self.above_level[plane][saved.above_start..above_end]
@@ -1691,6 +1736,7 @@ impl<'a> FrameEncoder<'a> {
         bw: usize,
         bh: usize,
     ) -> Vec<PlaneReconstructionSnapshot> {
+        let _timing = Guard::new(Kind::Snapshot);
         (0..self.planes.len())
             .map(|plane| {
                 let region = self.plane_block_region(plane, r, c, bw, bh);
@@ -1745,6 +1791,7 @@ impl<'a> FrameEncoder<'a> {
         plane: usize,
         snapshot: PlaneReconstructionSnapshot,
     ) {
+        let _timing = Guard::new(Kind::Restore);
         for y in 0..snapshot.block_decoded_height4 {
             for x in 0..snapshot.block_decoded_width4 {
                 let cell_r = snapshot.block_decoded_y4 + y;
@@ -1782,19 +1829,41 @@ impl<'a> FrameEncoder<'a> {
         self.measure_block_modes_local_with_angles(r, c, bw, y_mode, uv_mode, palette, 0, 0)
     }
 
-    fn begin_probe(&mut self, saved_rate: RateEstimator) -> AdaptiveSymbolEncoder {
-        let mut cdfs = self.probe_cdf_pool.pop().unwrap_or_default();
-        cdfs.clone_from(&self.sym.cdfs);
-        AdaptiveSymbolEncoder {
-            inner: None,
-            cdfs,
+    fn begin_probe(&mut self, saved_rate: RateEstimator) -> ProbeCheckpoint {
+        let previous_epoch = self.sym.probe_epoch;
+        let checkpoint = ProbeCheckpoint {
             rate: saved_rate,
-        }
+            inner: self.sym.inner.take(),
+            journal_len: self.sym.cdf_journal.len(),
+            previous_epoch,
+        };
+        let epoch = self.sym.next_probe_epoch;
+        self.sym.next_probe_epoch = epoch.wrapping_add(1).max(1);
+        self.sym.probe_epoch = Some(epoch);
+        self.sym.rate = checkpoint.rate.clone();
+        checkpoint
     }
 
-    fn end_probe(&mut self, saved_sym: AdaptiveSymbolEncoder) {
-        let probe_sym = std::mem::replace(&mut self.sym, saved_sym);
-        self.probe_cdf_pool.push(probe_sym.cdfs);
+    fn end_probe(&mut self, checkpoint: ProbeCheckpoint) {
+        let _timing = Guard::new(Kind::CdfRollback);
+        while self.sym.cdf_journal.len() > checkpoint.journal_len {
+            let undo = self
+                .sym
+                .cdf_journal
+                .pop()
+                .expect("CDF journal length must match its checkpoint");
+            match undo.previous {
+                Some(previous) => {
+                    self.sym.cdfs.insert(undo.key, previous);
+                }
+                None => {
+                    self.sym.cdfs.remove(&undo.key);
+                }
+            }
+        }
+        self.sym.rate = checkpoint.rate;
+        self.sym.inner = checkpoint.inner;
+        self.sym.probe_epoch = checkpoint.previous_epoch;
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -1809,14 +1878,14 @@ impl<'a> FrameEncoder<'a> {
         y_angle_delta: i8,
         uv_angle_delta: i8,
     ) -> usize {
+        let _timing = Guard::new(Kind::BlockMeasure);
         if bw == 4 {
             return self.measure_leaf_block_modes_local(r, c, y_mode, uv_mode, palette);
         }
         let snapshot = self.snapshot_block_context(r, c, bw);
         let saved_rate = self.sym.rate.clone();
         let saved_rate_q10 = saved_rate.rate_q10();
-        let probe_sym = self.begin_probe(saved_rate);
-        let saved_sym = std::mem::replace(&mut self.sym, probe_sym);
+        let checkpoint = self.begin_probe(saved_rate);
         self.encode_block_with_mode_shape_cfl(
             r,
             c,
@@ -1831,7 +1900,7 @@ impl<'a> FrameEncoder<'a> {
         );
         let size = (self.sym.rate.rate_q10() - saved_rate_q10) as usize;
         self.restore_block_context(snapshot);
-        self.end_probe(saved_sym);
+        self.end_probe(checkpoint);
         size
     }
 
@@ -1843,15 +1912,15 @@ impl<'a> FrameEncoder<'a> {
         uv_mode: u8,
         palette: Option<PaletteBlock>,
     ) -> usize {
+        let _timing = Guard::new(Kind::BlockMeasure);
         let snapshot = self.snapshot_leaf_context(r, c);
         let saved_rate = self.sym.rate.clone();
         let saved_rate_q10 = saved_rate.rate_q10();
-        let probe_sym = self.begin_probe(saved_rate);
-        let saved_sym = std::mem::replace(&mut self.sym, probe_sym);
+        let checkpoint = self.begin_probe(saved_rate);
         self.encode_block_with_mode(r, c, 4, palette, y_mode, uv_mode);
         let size = (self.sym.rate.rate_q10() - saved_rate_q10) as usize;
         self.restore_leaf_context(snapshot, r, c);
-        self.end_probe(saved_sym);
+        self.end_probe(checkpoint);
         size
     }
 
@@ -1955,19 +2024,20 @@ impl<'a> FrameEncoder<'a> {
         child_rdo_depth: u8,
         force_dc: bool,
     ) -> usize {
+        let _timing = Guard::new(Kind::PartitionMeasure);
         let snapshot = self.snapshot_block_context(r, c, bw);
         let saved_rate = self.sym.rate.clone();
         let saved_rate_q10 = saved_rate.rate_q10();
-        let probe_sym = self.begin_probe(saved_rate);
-        let saved_sym = std::mem::replace(&mut self.sym, probe_sym);
+        let checkpoint = self.begin_probe(saved_rate);
         self.encode_partition_choice(r, c, bw, partition, child_rdo_depth, force_dc);
         let size = (self.sym.rate.rate_q10() - saved_rate_q10) as usize;
         self.restore_block_context(snapshot);
-        self.end_probe(saved_sym);
+        self.end_probe(checkpoint);
         size
     }
 
     fn select_y_mode_shape(&mut self, r: usize, c: usize, bw: usize, bh: usize) -> u8 {
+        let _timing = Guard::new(Kind::ModeSearch);
         if bw != bh {
             return DC_PRED;
         }
@@ -2226,6 +2296,7 @@ impl<'a> FrameEncoder<'a> {
         mode: u8,
         angle_delta: i8,
     ) -> u64 {
+        let _timing = Guard::new(Kind::ModeCost);
         let shift_x = if plane == 0 { 0 } else { self.subsampling_x };
         let shift_y = if plane == 0 { 0 } else { self.subsampling_y };
         let sx = (c * 4) >> shift_x;
@@ -2262,6 +2333,7 @@ impl<'a> FrameEncoder<'a> {
         bh: usize,
         normal_uv_mode: u8,
     ) -> Option<(i8, i8)> {
+        let _timing = Guard::new(Kind::CflSearch);
         if self.monochrome
             || self.planes.len() < 3
             || !self.is_chroma_reference_shape(r, c, bw, bh)

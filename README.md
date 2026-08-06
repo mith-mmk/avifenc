@@ -76,6 +76,16 @@ container contract.
 Use executable paths for FFmpeg and libavif as the fourth and fifth arguments
 when they are not available on `PATH`.
 
+For release hotspot profiling, add the `profile` feature to the same benchmark
+command. The report is written to stderr after each encode and separates the
+RGBA conversion, rav1e, container, and Pure Rust lossless-RDO phases. Nested
+phase times are inclusive, so they must not be summed:
+
+```text
+  cargo run --release --features "multithread,profile" --example benchmark -- \
+  input.rgba 1152 896 ffmpeg avifenc benchmark-output 1
+```
+
 The optional `multithread` feature enables rav1e's native threading backend
 and parallelizes the independent base and complete keyframe candidates when
 the default `jobs=all` setting is used. The feature is disabled by default so

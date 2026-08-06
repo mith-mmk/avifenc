@@ -67,9 +67,9 @@ pub(crate) fn encode_still_lossless(planes: &LosslessPlanes<'_>) -> Result<Encod
         planes.monochrome,
         screen_content_tools,
     );
-    frame_payload.extend_from_slice(
-        &FrameEncoder::new(planes, screen_content_tools, uv_palette_content).encode(),
-    );
+    let encoded_frame =
+        FrameEncoder::new(planes, screen_content_tools, uv_palette_content).encode();
+    frame_payload.extend_from_slice(&encoded_frame);
 
     Ok(EncodedStill {
         obus: headers::assemble_temporal_unit(&seq_payload, &frame_payload),
