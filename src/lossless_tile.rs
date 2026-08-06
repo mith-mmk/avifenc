@@ -570,6 +570,8 @@ struct ModeSelection {
     /// measuring the winning Y mode. Other shapes retain the old follow-up
     /// UV search and leave this unset.
     uv_mode: Option<u8>,
+    /// Exact rate of the selected mode pair when the mode search measured it.
+    rate: Option<usize>,
 }
 
 #[derive(Clone, Copy)]
@@ -1329,6 +1331,7 @@ impl<'a> FrameEncoder<'a> {
                 .map(|y_mode| ModeSelection {
                     y_mode,
                     uv_mode: None,
+                    rate: None,
                 })
                 .unwrap_or_else(|| self.select_y_mode_shape(r, c, bw, bh))
         } else {
@@ -1343,8 +1346,6 @@ impl<'a> FrameEncoder<'a> {
                     .mode
             }
         });
-        let (normal_y_angle_delta, normal_uv_angle_delta) =
-            self.select_angle_deltas(r, c, bw, normal_y_mode, normal_uv_mode);
         let palette = palette_candidate.and_then(|candidate| {
             // Larger palettes are worthwhile only when their complete syntax
             // (palette size, cache/color signaling, and map tokens) beats the
@@ -1371,8 +1372,9 @@ impl<'a> FrameEncoder<'a> {
                 palette_uv_mode,
                 Some(candidate.clone()),
             );
-            let normal_rate =
-                self.measure_block_modes_local(r, c, bw, normal_y_mode, normal_uv_mode, None);
+            let normal_rate = mode_selection.rate.unwrap_or_else(|| {
+                self.measure_block_modes_local(r, c, bw, normal_y_mode, normal_uv_mode, None)
+            });
             (palette_rate < normal_rate).then_some(candidate)
         });
         let y_mode = if palette.is_some() {
@@ -1391,6 +1393,8 @@ impl<'a> FrameEncoder<'a> {
         } else {
             normal_uv_mode
         };
+        let (normal_y_angle_delta, normal_uv_angle_delta) =
+            self.select_angle_deltas(r, c, bw, y_mode, normal_uv_mode);
         let y_angle_delta = if palette.as_ref().is_some_and(PaletteBlock::has_y) {
             0
         } else {
@@ -2304,6 +2308,7 @@ impl<'a> FrameEncoder<'a> {
             return ModeSelection {
                 y_mode: DC_PRED,
                 uv_mode: None,
+                rate: None,
             };
         }
         // Keep subsampled lossless planes on the proven DC path for now.  In
@@ -2314,6 +2319,7 @@ impl<'a> FrameEncoder<'a> {
             return ModeSelection {
                 y_mode: DC_PRED,
                 uv_mode: None,
+                rate: None,
             };
         }
         // Boundary references use the decoder-visible reconstructed coded
@@ -2398,6 +2404,7 @@ impl<'a> FrameEncoder<'a> {
         ModeSelection {
             y_mode: best_mode,
             uv_mode: Some(best_uv_mode),
+            rate: Some(best_size),
         }
     }
 
