@@ -40,7 +40,40 @@ impl Hasher for CdfKeyHasher {
     }
 }
 
-type CdfMap = HashMap<usize, (Vec<u16>, u16), BuildHasherDefault<CdfKeyHasher>>;
+const MAX_ADAPTIVE_CDF_LEN: usize = 16;
+
+#[derive(Clone)]
+struct AdaptiveCdfState {
+    values: [u16; MAX_ADAPTIVE_CDF_LEN],
+    len: u8,
+    count: u16,
+}
+
+impl AdaptiveCdfState {
+    fn new(cdf: &[u16]) -> Self {
+        assert!(
+            cdf.len() <= MAX_ADAPTIVE_CDF_LEN,
+            "adaptive CDF is too large"
+        );
+        let mut values = [0; MAX_ADAPTIVE_CDF_LEN];
+        values[..cdf.len()].copy_from_slice(cdf);
+        Self {
+            values,
+            len: cdf.len() as u8,
+            count: 0,
+        }
+    }
+
+    fn values(&self) -> &[u16] {
+        &self.values[..usize::from(self.len)]
+    }
+
+    fn values_mut(&mut self) -> &mut [u16] {
+        &mut self.values[..usize::from(self.len)]
+    }
+}
+
+type CdfMap = HashMap<usize, AdaptiveCdfState, BuildHasherDefault<CdfKeyHasher>>;
 
 /// AV1's range coder state used only for fractional-rate estimation.
 ///
@@ -174,13 +207,18 @@ impl AdaptiveSymbolEncoder {
     }
 
     fn encode_symbol_with_key(&mut self, symbol: usize, cdf: &[u16], key: usize) {
-        let state = self.cdfs.entry(key).or_insert_with(|| (cdf.to_vec(), 0));
-        self.rate.encode_symbol(symbol, &state.0);
+        let state = self
+            .cdfs
+            .entry(key)
+            .or_insert_with(|| AdaptiveCdfState::new(cdf));
+        self.rate.encode_symbol(symbol, state.values());
+        let mut count = state.count;
         if let Some(inner) = self.inner.as_mut() {
-            inner.encode_symbol_adapt(symbol, &mut state.0, &mut state.1);
+            inner.encode_symbol_adapt(symbol, state.values_mut(), &mut count);
         } else {
-            adapt_cdf(&mut state.0, symbol, &mut state.1);
+            adapt_cdf(state.values_mut(), symbol, &mut count);
         }
+        state.count = count;
     }
 
     /// Encodes a symbol with a temporary CDF. AV1's edge-restricted
@@ -201,9 +239,9 @@ impl AdaptiveSymbolEncoder {
         let key = cdf.as_ptr() as usize;
         self.cdfs
             .entry(key)
-            .or_insert_with(|| (cdf.to_vec(), 0))
-            .0
-            .clone()
+            .or_insert_with(|| AdaptiveCdfState::new(cdf))
+            .values()
+            .to_vec()
     }
 
     fn encode_literal(&mut self, value: u32, bits: u32) {
@@ -3540,12 +3578,24 @@ mod tests {
     fn cdf_map_keeps_integer_context_keys_distinct() {
         let mut map = CdfMap::default();
         for key in [0, 1, usize::MAX / 2, usize::MAX] {
-            map.insert(key, (vec![key as u16], 0));
+            map.insert(key, AdaptiveCdfState::new(&[key as u16]));
         }
         assert_eq!(map.len(), 4);
         for key in [0, 1, usize::MAX / 2, usize::MAX] {
-            assert_eq!(map[&key].0, vec![key as u16]);
+            assert_eq!(map[&key].values(), &[key as u16]);
         }
+    }
+
+    #[test]
+    fn adaptive_cdf_state_clones_without_changing_values_or_count() {
+        let mut state = AdaptiveCdfState::new(&[8192, 16_384, 24_576, 32_768]);
+        let mut count = state.count;
+        adapt_cdf(state.values_mut(), 2, &mut count);
+        state.count = count;
+        let cloned = state.clone();
+
+        assert_eq!(cloned.values(), state.values());
+        assert_eq!(cloned.count, state.count);
     }
 
     #[test]
