@@ -1444,11 +1444,10 @@ impl<'a> FrameEncoder<'a> {
                     continue;
                 }
                 let mode = if plane == 0 { y_mode } else { uv_mode };
+                let predictions = self.predict_block_4x4(plane, px, py, mode, 0);
                 for y in 0..4 {
                     for x in 0..4 {
-                        if self.sample(plane, px + x, py + y)
-                            != self.predict_block_sample(plane, px + x, py + y, mode, 0, px, py, 4)
-                        {
+                        if self.sample(plane, px + x, py + y) != predictions[y * 4 + x] {
                             return false;
                         }
                     }
@@ -1477,19 +1476,16 @@ impl<'a> FrameEncoder<'a> {
                     {
                         continue;
                     }
+                    let predictions = self.predict_block_4x4(
+                        plane,
+                        px,
+                        py,
+                        if plane == 0 { y_mode } else { uv_mode },
+                        0,
+                    );
                     for y in 0..4 {
                         for x in 0..4 {
-                            let prediction = self.predict_block_sample(
-                                plane,
-                                px + x,
-                                py + y,
-                                if plane == 0 { y_mode } else { uv_mode },
-                                0,
-                                sx,
-                                sy,
-                                unit_w,
-                            );
-                            if self.sample(plane, px + x, py + y) != prediction {
+                            if self.sample(plane, px + x, py + y) != predictions[y * 4 + x] {
                                 skippable = false;
                                 break 'planes;
                             }
@@ -2160,22 +2156,14 @@ impl<'a> FrameEncoder<'a> {
         let mut cost = 0u64;
         for ty in 0..unit_h.div_ceil(4) {
             for tx in 0..unit_w.div_ceil(4) {
+                let px = sx + tx * 4;
+                let py = sy + ty * 4;
+                let predictions = self.predict_block_4x4(plane, px, py, mode, angle_delta);
                 let mut residual = [0i32; 16];
                 for y in 0..4 {
                     for x in 0..4 {
-                        let px = sx + tx * 4 + x;
-                        let py = sy + ty * 4 + y;
-                        residual[y * 4 + x] = self.sample(plane, px, py)
-                            - self.predict_block_sample(
-                                plane,
-                                px,
-                                py,
-                                mode,
-                                angle_delta,
-                                sx,
-                                sy,
-                                unit_w,
-                            );
+                        residual[y * 4 + x] =
+                            self.sample(plane, px + x, py + y) - predictions[y * 4 + x];
                     }
                 }
                 cost += gamut_dsp::fwht4x4(&residual)
@@ -2776,12 +2764,15 @@ impl<'a> FrameEncoder<'a> {
         block_area: usize,
         mode: u8,
         angle_delta: i8,
-        block_sx: usize,
-        block_sy: usize,
+        _block_sx: usize,
+        _block_sy: usize,
         cfl_alpha_q3: Option<i8>,
     ) {
         let mut res = [0i32; 16];
         let cfl_luma_deltas = cfl_alpha_q3.map(|_| self.cfl_luma_deltas(sx, sy));
+        let predictions = cfl_alpha_q3
+            .is_none()
+            .then(|| self.predict_block_4x4(plane, sx, sy, mode, angle_delta));
         for i in 0..4 {
             for j in 0..4 {
                 let sample = self.sample(plane, sx + j, sy + i);
@@ -2794,16 +2785,7 @@ impl<'a> FrameEncoder<'a> {
                         cfl_luma_deltas.as_ref().expect("CFL luma deltas"),
                     )
                 } else {
-                    self.predict_block_sample(
-                        plane,
-                        sx + j,
-                        sy + i,
-                        mode,
-                        angle_delta,
-                        block_sx,
-                        block_sy,
-                        block_width,
-                    )
+                    predictions.as_ref().expect("intra predictions")[i * 4 + j]
                 };
                 res[i * 4 + j] = sample - prediction;
             }
@@ -2813,108 +2795,92 @@ impl<'a> FrameEncoder<'a> {
         self.reconstruct_source_block(plane, sx, sy);
     }
 
-    /// Lossless 4×4 intra prediction. The fallback values match AV1's
-    /// unavailable-edge reference construction:
-    /// above defaults to `2^(bd-1)-1`, left to `2^(bd-1)+1`, and the first
-    /// available edge is replicated across the missing side.
-    #[allow(clippy::too_many_arguments)]
-    fn predict_block_sample(
+    /// Builds one lossless 4×4 intra predictor while sharing its edge
+    /// references across all 16 samples.
+    fn predict_block_4x4(
         &self,
         plane: usize,
         sx: usize,
         sy: usize,
         mode: u8,
         angle_delta: i8,
-        _block_sx: usize,
-        _block_sy: usize,
-        _block_width: usize,
-    ) -> i32 {
-        if mode == DC_PRED {
-            return self.dc_avg(plane, sx & !3, sy & !3);
-        }
+    ) -> [i32; 16] {
         let block_sx = sx & !3;
         let block_sy = sy & !3;
-        let block_width = 4;
-        let x_offset = sx - block_sx;
-        let y_offset = sy - block_sy;
-        let above_ref = self.reference_above(plane, block_sx, block_sy, block_sx + block_width);
-        let left_ref = self.reference_left(plane, block_sx, block_sy, block_sy + block_width);
-        let above = above_ref[x_offset];
-        let left = left_ref[y_offset];
-        match mode {
-            V_PRED => above,
-            H_PRED => left,
-            D45_PRED..=D67_PRED => {
-                self.predict_directional_sample(plane, sx, sy, mode, angle_delta)
-            }
-            SMOOTH_PRED | SMOOTH_V_PRED | SMOOTH_H_PRED => {
-                let top_right = above_ref[block_width - 1];
-                let bottom_left = left_ref[block_width - 1];
-                let wx = smooth_weight(block_width, x_offset);
-                let wy = smooth_weight(block_width, y_offset);
-                match mode {
+        if mode == DC_PRED {
+            return [self.dc_avg(plane, block_sx, block_sy); 16];
+        }
+        let above = self.reference_above(plane, block_sx, block_sy);
+        let left = self.reference_left(plane, block_sx, block_sy);
+        let top_left = self.reference_top_left(plane, block_sx, block_sy);
+        let top_right = above[3];
+        let bottom_left = left[3];
+        let mut predictions = [0; 16];
+        for y in 0..4 {
+            for x in 0..4 {
+                let above_sample = above[x];
+                let left_sample = left[y];
+                predictions[y * 4 + x] = match mode {
+                    V_PRED => above_sample,
+                    H_PRED => left_sample,
+                    D45_PRED..=D67_PRED => self.predict_directional_sample_from_edges(
+                        &above,
+                        &left,
+                        top_left,
+                        x,
+                        y,
+                        mode,
+                        angle_delta,
+                    ),
                     SMOOTH_V_PRED => {
-                        (wy * above_ref[x_offset] + (256 - wy) * bottom_left + 128) >> 8
+                        let wy = smooth_weight(4, y);
+                        (wy * above_sample + (256 - wy) * bottom_left + 128) >> 8
                     }
                     SMOOTH_H_PRED => {
-                        let left = left_ref[y_offset];
-                        (wx * left + (256 - wx) * top_right + 128) >> 8
+                        let wx = smooth_weight(4, x);
+                        (wx * left_sample + (256 - wx) * top_right + 128) >> 8
                     }
-                    _ => {
-                        let left = left_ref[y_offset];
-                        (wy * above_ref[x_offset]
+                    SMOOTH_PRED => {
+                        let wx = smooth_weight(4, x);
+                        let wy = smooth_weight(4, y);
+                        (wy * above_sample
                             + (256 - wy) * bottom_left
-                            + wx * left
+                            + wx * left_sample
                             + (256 - wx) * top_right
                             + 256)
                             >> 9
                     }
-                }
-            }
-            PAETH_PRED => {
-                let top_left = if block_sx > 0 && block_sy > 0 {
-                    self.reconstructed_sample(plane, block_sx - 1, block_sy - 1)
-                } else if block_sy > 0 {
-                    self.reconstructed_sample(plane, block_sx, block_sy - 1)
-                } else if block_sx > 0 {
-                    self.reconstructed_sample(plane, block_sx - 1, block_sy)
-                } else {
-                    1 << (self.bit_depth - 1)
+                    PAETH_PRED => {
+                        let base = above_sample + left_sample - top_left;
+                        let p_left = (base - left_sample).abs();
+                        let p_top = (base - above_sample).abs();
+                        let p_top_left = (base - top_left).abs();
+                        if p_left <= p_top && p_left <= p_top_left {
+                            left_sample
+                        } else if p_top <= p_top_left {
+                            above_sample
+                        } else {
+                            top_left
+                        }
+                    }
+                    _ => unreachable!("lossless mode search only emits AV1 intra modes"),
                 };
-                let base = above + left - top_left;
-                let p_left = (base - left).abs();
-                let p_top = (base - above).abs();
-                let p_top_left = (base - top_left).abs();
-                if p_left <= p_top && p_left <= p_top_left {
-                    left
-                } else if p_top <= p_top_left {
-                    above
-                } else {
-                    top_left
-                }
             }
-            _ => unreachable!("lossless mode search only emits AV1 intra modes"),
         }
+        predictions
     }
 
-    /// Predicts one sample of a directional 4×4 transform. In AV1, a block
-    /// mode is reused by each transform in a partition, but its directional
-    /// references are constructed at that transform's own origin.
-    fn predict_directional_sample(
+    #[allow(clippy::too_many_arguments)]
+    fn predict_directional_sample_from_edges(
         &self,
-        plane: usize,
-        sx: usize,
-        sy: usize,
+        above: &[i32],
+        left: &[i32],
+        top_left: i32,
+        x: usize,
+        y: usize,
         mode: u8,
         angle_delta: i8,
     ) -> i32 {
-        let block_sx = sx & !3;
-        let block_sy = sy & !3;
-        let above = self.reference_above(plane, block_sx, block_sy, block_sx + 4);
-        let left = self.reference_left(plane, block_sx, block_sy, block_sy + 4);
-        let top_left = self.reference_top_left(plane, block_sx, block_sy);
-        let x = sx & 3;
-        let y = sy & 3;
         let i = y as i32;
         let j = x as i32;
         let angle =
@@ -2979,14 +2945,8 @@ impl<'a> FrameEncoder<'a> {
         }
     }
 
-    fn reference_above(
-        &self,
-        plane: usize,
-        block_sx: usize,
-        block_sy: usize,
-        block_end_x: usize,
-    ) -> Vec<i32> {
-        let n = block_end_x - block_sx;
+    fn reference_above(&self, plane: usize, block_sx: usize, block_sy: usize) -> [i32; 9] {
+        const N: usize = 4;
         let fallback = 1 << (self.bit_depth - 1);
         let by = block_sy / 4 - self.sb_r;
         let bx = block_sx / 4 - self.sb_c;
@@ -2994,54 +2954,50 @@ impl<'a> FrameEncoder<'a> {
             // The complete superblock row above has already been decoded,
             // including the neighbouring horizontal superblock.  The local
             // BlockDecoded guard cannot represent that cross-superblock edge.
-            block_sx + n < self.plane_widths[plane]
+            block_sx + N < self.plane_widths[plane]
         } else {
-            self.block_decoded_at(plane, by as isize - 1, bx as isize + (n / 4) as isize)
+            self.block_decoded_at(plane, by as isize - 1, bx as isize + 1)
         };
+        let mut reference = [0; 2 * N + 1];
         if block_sy > 0 {
-            let available = if have_above_right { 2 * n } else { n };
-            (0..2 * n + 1)
-                .map(|x| {
-                    self.reconstructed_sample(plane, block_sx + x.min(available - 1), block_sy - 1)
-                })
-                .collect()
+            let available = if have_above_right { 2 * N } else { N };
+            for (x, sample) in reference.iter_mut().enumerate() {
+                *sample =
+                    self.reconstructed_sample(plane, block_sx + x.min(available - 1), block_sy - 1);
+            }
         } else if block_sx > 0 {
-            vec![self.reconstructed_sample(plane, block_sx - 1, block_sy); 2 * n + 1]
+            reference.fill(self.reconstructed_sample(plane, block_sx - 1, block_sy));
         } else {
-            vec![fallback - 1; 2 * n + 1]
+            reference.fill(fallback - 1);
         }
+        reference
     }
 
-    fn reference_left(
-        &self,
-        plane: usize,
-        block_sx: usize,
-        block_sy: usize,
-        block_end_y: usize,
-    ) -> Vec<i32> {
-        let n = block_end_y - block_sy;
+    fn reference_left(&self, plane: usize, block_sx: usize, block_sy: usize) -> [i32; 9] {
+        const N: usize = 4;
         let fallback = 1 << (self.bit_depth - 1);
         let by = block_sy / 4 - self.sb_r;
         let bx = block_sx / 4 - self.sb_c;
         let have_below_left = if block_sx / 4 == self.sb_c && block_sx > 0 {
             // The complete superblock column to the left has already been
             // decoded, including the neighbouring vertical superblock.
-            block_sy + n < self.plane_heights[plane]
+            block_sy + N < self.plane_heights[plane]
         } else {
-            self.block_decoded_at(plane, by as isize + (n / 4) as isize, bx as isize - 1)
+            self.block_decoded_at(plane, by as isize + 1, bx as isize - 1)
         };
+        let mut reference = [0; 2 * N + 1];
         if block_sx > 0 {
-            let available = if have_below_left { 2 * n } else { n };
-            (0..2 * n + 1)
-                .map(|y| {
-                    self.reconstructed_sample(plane, block_sx - 1, block_sy + y.min(available - 1))
-                })
-                .collect()
+            let available = if have_below_left { 2 * N } else { N };
+            for (y, sample) in reference.iter_mut().enumerate() {
+                *sample =
+                    self.reconstructed_sample(plane, block_sx - 1, block_sy + y.min(available - 1));
+            }
         } else if block_sy > 0 {
-            vec![self.reconstructed_sample(plane, block_sx, block_sy - 1); 2 * n + 1]
+            reference.fill(self.reconstructed_sample(plane, block_sx, block_sy - 1));
         } else {
-            vec![fallback + 1; 2 * n + 1]
+            reference.fill(fallback + 1);
         }
+        reference
     }
 
     fn reference_top_left(&self, plane: usize, block_sx: usize, block_sy: usize) -> i32 {
@@ -3584,7 +3540,7 @@ mod tests {
             planes: vec![&samples],
         };
         let encoder = FrameEncoder::new(&planes, true);
-        let predicted = encoder.predict_block_sample(0, 4, 4, SMOOTH_H_PRED, 0, 4, 4, 4);
+        let predicted = encoder.predict_block_4x4(0, 4, 4, SMOOTH_H_PRED, 0)[0];
         assert_eq!(predicted, 10);
     }
 
@@ -3608,7 +3564,63 @@ mod tests {
             planes: vec![&samples],
         };
         let encoder = FrameEncoder::new(&planes, true);
-        let predicted = encoder.predict_block_sample(0, 4, 4, SMOOTH_PRED, 0, 4, 4, 4);
+        let predicted = encoder.predict_block_4x4(0, 4, 4, SMOOTH_PRED, 0)[0];
         assert_eq!(predicted, 55);
+    }
+
+    #[test]
+    fn transform_wide_predictions_match_reference_vectors() {
+        let samples = (0..144)
+            .map(|index| {
+                let (row, col) = (index / 12, index % 12);
+                (row * 17 + col * 11 + row * col * 3) as u16
+            })
+            .collect::<Vec<_>>();
+        let planes = LosslessPlanes {
+            width: 12,
+            height: 12,
+            bit_depth: 12,
+            monochrome: true,
+            subsampling_x: 0,
+            subsampling_y: 0,
+            color_primaries: 1,
+            transfer_characteristics: 13,
+            matrix_coefficients: 0,
+            full_range: true,
+            planes: vec![&samples],
+        };
+        let encoder = FrameEncoder::new(&planes, true);
+        for (mode, angle, expected) in [
+            (
+                D45_PRED,
+                -3,
+                [
+                    159, 179, 191, 191, 187, 191, 191, 191, 191, 191, 191, 191, 191, 191, 191, 191,
+                ],
+            ),
+            (
+                D135_PRED,
+                2,
+                [
+                    116, 126, 146, 166, 142, 122, 121, 141, 168, 148, 126, 116, 194, 174, 152, 132,
+                ],
+            ),
+            (
+                SMOOTH_PRED,
+                0,
+                [
+                    134, 155, 172, 184, 165, 176, 186, 193, 188, 192, 195, 199, 204, 202, 201, 203,
+                ],
+            ),
+            (
+                PAETH_PRED,
+                0,
+                [
+                    137, 151, 171, 191, 163, 163, 171, 191, 189, 189, 189, 191, 215, 215, 215, 215,
+                ],
+            ),
+        ] {
+            assert_eq!(encoder.predict_block_4x4(0, 4, 4, mode, angle), expected);
+        }
     }
 }
