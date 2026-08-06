@@ -13,8 +13,34 @@ use crate::lossless_cdf as cdf;
 use crate::lossless_types::LosslessPlanes;
 use gamut_bitstream::SymbolEncoder as RangeEncoder;
 use std::collections::HashMap;
+use std::hash::{BuildHasherDefault, Hasher};
 
 const CFL_PRED: u8 = 13;
+
+/// The adaptive-CDF table is keyed exclusively by internal pointer-sized
+/// context identities. Hashing those trusted integer keys with SipHash on
+/// every coded symbol is unnecessary; equality and collision handling remain
+/// the `HashMap`'s responsibility.
+#[derive(Default)]
+struct CdfKeyHasher(u64);
+
+impl Hasher for CdfKeyHasher {
+    fn finish(&self) -> u64 {
+        self.0
+    }
+
+    fn write(&mut self, bytes: &[u8]) {
+        self.0 = bytes.iter().fold(0xcbf29ce484222325, |hash, byte| {
+            (hash ^ u64::from(*byte)).wrapping_mul(0x100000001b3)
+        });
+    }
+
+    fn write_usize(&mut self, value: usize) {
+        self.0 = value as u64;
+    }
+}
+
+type CdfMap = HashMap<usize, (Vec<u16>, u16), BuildHasherDefault<CdfKeyHasher>>;
 
 /// AV1's range coder state used only for fractional-rate estimation.
 ///
@@ -130,7 +156,7 @@ impl RateEstimator {
 #[derive(Clone)]
 struct AdaptiveSymbolEncoder {
     inner: Option<RangeEncoder>,
-    cdfs: HashMap<usize, (Vec<u16>, u16)>,
+    cdfs: CdfMap,
     rate: RateEstimator,
 }
 
@@ -138,7 +164,7 @@ impl AdaptiveSymbolEncoder {
     fn new() -> Self {
         Self {
             inner: Some(RangeEncoder::new()),
-            cdfs: HashMap::new(),
+            cdfs: CdfMap::default(),
             rate: RateEstimator::new(),
         }
     }
@@ -3513,6 +3539,18 @@ fn golomb(sym: &mut AdaptiveSymbolEncoder, x: u32) {
 mod tests {
     use super::*;
     use crate::lossless_types::LosslessPlanes;
+
+    #[test]
+    fn cdf_map_keeps_integer_context_keys_distinct() {
+        let mut map = CdfMap::default();
+        for key in [0, 1, usize::MAX / 2, usize::MAX] {
+            map.insert(key, (vec![key as u16], 0));
+        }
+        assert_eq!(map.len(), 4);
+        for key in [0, 1, usize::MAX / 2, usize::MAX] {
+            assert_eq!(map[&key].0, vec![key as u16]);
+        }
+    }
 
     #[test]
     fn rate_estimator_assigns_fewer_bits_to_likely_symbols() {
