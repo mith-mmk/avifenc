@@ -28,7 +28,6 @@ struct RateEstimator {
     rng: u32,
     cnt: i32,
     stream_bits: u32,
-    rate_q10: u64,
 }
 
 impl RateEstimator {
@@ -42,7 +41,6 @@ impl RateEstimator {
             rng: Self::CDF_PROB_TOP,
             cnt: -9,
             stream_bits: 0,
-            rate_q10: 0,
         }
     }
 
@@ -82,7 +80,6 @@ impl RateEstimator {
         }
 
         self.normalize(low, range);
-        self.rate_q10 = self.tell_frac_q10();
     }
 
     fn normalize(&mut self, mut low: u64, range: u32) {
@@ -111,7 +108,11 @@ impl RateEstimator {
     /// interval, matching libaom/rav1e's `tell_frac` convention. The final
     /// range is accounted for instead of rounding every symbol's probability
     /// independently, which makes close RDO candidates deterministic.
-    fn tell_frac_q10(&self) -> u64 {
+    ///
+    /// RDO only observes the rate at candidate boundaries. Keeping this query
+    /// lazy avoids the ten refinement rounds after every encoded symbol while
+    /// preserving the exact boundary rate used for candidate selection.
+    fn rate_q10(&self) -> u64 {
         let total_bits =
             u64::from(self.stream_bits).saturating_add_signed(i64::from(self.cnt) + 10);
         let mut range = self.rng;
@@ -1718,6 +1719,7 @@ impl<'a> FrameEncoder<'a> {
         let snapshot = self.snapshot_block_context(r, c, bw);
         let cdfs = self.sym.cdfs.clone();
         let saved_rate = self.sym.rate.clone();
+        let saved_rate_q10 = saved_rate.rate_q10();
         let saved_sym = std::mem::replace(
             &mut self.sym,
             AdaptiveSymbolEncoder {
@@ -1738,7 +1740,7 @@ impl<'a> FrameEncoder<'a> {
             uv_angle_delta,
             None,
         );
-        let size = (self.sym.rate.rate_q10 - saved_rate.rate_q10) as usize;
+        let size = (self.sym.rate.rate_q10() - saved_rate_q10) as usize;
         self.restore_block_context(snapshot);
         self.sym = saved_sym;
         size
@@ -1755,6 +1757,7 @@ impl<'a> FrameEncoder<'a> {
         let snapshot = self.snapshot_leaf_context(r, c);
         let cdfs = self.sym.cdfs.clone();
         let saved_rate = self.sym.rate.clone();
+        let saved_rate_q10 = saved_rate.rate_q10();
         let saved_sym = std::mem::replace(
             &mut self.sym,
             AdaptiveSymbolEncoder {
@@ -1764,7 +1767,7 @@ impl<'a> FrameEncoder<'a> {
             },
         );
         self.encode_block_with_mode(r, c, 4, palette, y_mode, uv_mode);
-        let size = (self.sym.rate.rate_q10 - saved_rate.rate_q10) as usize;
+        let size = (self.sym.rate.rate_q10() - saved_rate_q10) as usize;
         self.restore_leaf_context(snapshot, r, c);
         self.sym = saved_sym;
         size
@@ -1873,6 +1876,7 @@ impl<'a> FrameEncoder<'a> {
         let snapshot = self.snapshot_block_context(r, c, bw);
         let cdfs = self.sym.cdfs.clone();
         let saved_rate = self.sym.rate.clone();
+        let saved_rate_q10 = saved_rate.rate_q10();
         let saved_sym = std::mem::replace(
             &mut self.sym,
             AdaptiveSymbolEncoder {
@@ -1882,7 +1886,7 @@ impl<'a> FrameEncoder<'a> {
             },
         );
         self.encode_partition_choice(r, c, bw, partition, child_rdo_depth, force_dc);
-        let size = (self.sym.rate.rate_q10 - saved_rate.rate_q10) as usize;
+        let size = (self.sym.rate.rate_q10() - saved_rate_q10) as usize;
         self.restore_block_context(snapshot);
         self.sym = saved_sym;
         size
@@ -3517,7 +3521,7 @@ mod tests {
         likely.encode_symbol(0, &SKEWED_CDF);
         let mut unlikely = RateEstimator::new();
         unlikely.encode_symbol(3, &SKEWED_CDF);
-        assert!(likely.rate_q10 < unlikely.rate_q10);
+        assert!(likely.rate_q10() < unlikely.rate_q10());
     }
 
     #[test]
