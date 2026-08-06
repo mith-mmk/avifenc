@@ -56,19 +56,20 @@ includes the FFmpeg process invocation, so it is an end-to-end reference and
 not a direct comparison of the AVIF encoder's in-process core timing. The
 libavif timing similarly includes the `avifenc` process invocation. The
 libavif row uses `--yuv 420`, `--jobs all`, and matching `--qcolor`/`--qalpha`.
-The default path enables full transform RDO and full segmentation search,
-then adaptively compares the preset's keyframe intra-mode search with the
-complete keyframe search on faster presets. It also uses pixel-domain
-distortion and bottom-up partition search for compression at every speed;
-the explicit `rdo_tx_decision=false,reduced_tx_set=true` metadata combination
-restores the faster rav1e transform preset. The benchmark also includes
-`q60-s6-fast`, `q90-s10-rdo`, `q90-s10-rdo-psnr`, and `q90-s9-rdo` to separate
-rav1e preset and tuning differences from the public quality mapping when
-comparing against libavif.
-For the slower presets (speed 0 through 6), the middle `qcolor`/`qalpha`
-range 50 through 65 applies a two-point rav1e rate/distortion calibration;
-this compensates for the different still-image tuning curve while leaving
-the q75/q90 and speed-10 mappings unchanged.
+The default path enables PSNR-tuned pixel-domain RDO, full transform RDO, and
+full segmentation search, then adaptively compares the preset's keyframe
+intra-mode search with the complete keyframe search on faster presets. It also
+uses bottom-up partition search for compression at every speed; the explicit
+`tune=psychovisual` metadata option restores rav1e's perceptual tuning, while
+`rdo_tx_decision=false,reduced_tx_set=true` restores the faster rav1e
+transform preset. The benchmark also includes `q60-s6-fast`,
+`q60-s6-psychovisual`, `q90-s10-rdo`, `q90-s10-rdo-psychovisual`, and
+`q90-s9-rdo` to separate rav1e preset and tuning differences from the public
+quality mapping when comparing against libavif.
+The lossy path applies a content-independent codec-scale calibration to the
+public `qcolor`/`qalpha` values at every speed. This compensates for the
+different rav1e/libaom still-image rate/distortion curves; `q=100` remains the
+separate mathematically-lossless path.
 Grayscale RGBA input is encoded as a single YUV400 plane automatically; this
 avoids three-channel coding for monochrome images while preserving the AVIF
 container contract.

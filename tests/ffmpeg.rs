@@ -184,6 +184,27 @@ fn gradient(with_alpha: bool) -> ImageBuffer {
     }
 }
 
+fn odd_lossless_gradient() -> ImageBuffer {
+    let width = 64;
+    let height = 50;
+    let mut rgba = Vec::with_capacity(width * height * 4);
+    for y in 0..height {
+        for x in 0..width {
+            rgba.extend_from_slice(&[
+                ((x * 11 + y * 3) & 0xff) as u8,
+                ((x * 5 + y * 17) & 0xff) as u8,
+                ((x * 13 + y * 7) & 0xff) as u8,
+                255,
+            ]);
+        }
+    }
+    ImageBuffer {
+        width,
+        height,
+        rgba,
+    }
+}
+
 fn large_lossless_gradient() -> ImageBuffer {
     let width = 128;
     let height = 128;
@@ -307,6 +328,23 @@ fn ffmpeg_decodes_opaque_rgba8_lossless_bit_exactly_when_available() {
     assert_eq!(fs::read(&raw).unwrap(), image.rgba);
     let _ = fs::remove_file(input);
     let _ = fs::remove_file(raw);
+}
+
+#[test]
+fn ffmpeg_decodes_odd_dimensions_lossless_color_bit_exactly_when_available() {
+    let Some(ffmpeg) = ffmpeg_path() else {
+        eprintln!("ffmpeg is not available; skipping odd-dimension lossless oracle");
+        return;
+    };
+    let input = temporary_path("avif");
+    let image = odd_lossless_gradient();
+    let options = EncoderOptions {
+        lossless: true,
+        ..EncoderOptions::default()
+    };
+    fs::write(&input, encode_bytes(&image, &options).unwrap()).unwrap();
+    assert_ffmpeg_raw_decode_equals(&ffmpeg, &input, "rgba", &image.rgba);
+    let _ = fs::remove_file(input);
 }
 
 #[test]
@@ -962,6 +1000,54 @@ fn ffmpeg_decodes_native_subsampled_lossless_planes_exactly() {
         assert_ffmpeg_raw_decode_equals(&ffmpeg, &input, pixel_format, &expected);
         let _ = fs::remove_file(input);
     }
+}
+
+#[test]
+fn ffmpeg_decodes_native_444_uv_palette_losslessly() {
+    let Some(ffmpeg) = ffmpeg_path() else {
+        eprintln!("ffmpeg is not available; skipping UV palette oracle");
+        return;
+    };
+    let width = 64;
+    let height = 64;
+    let y = vec![128u16; width * height];
+    let pairs = [(32u16, 64u16), (96, 128), (160, 192), (224, 32)];
+    let mut u = Vec::with_capacity(width * height);
+    let mut v = Vec::with_capacity(width * height);
+    for y_pos in 0..height {
+        for x_pos in 0..width {
+            let (u_value, v_value) = pairs[(x_pos / 8 + y_pos / 8) % pairs.len()];
+            u.push(u_value);
+            v.push(v_value);
+        }
+    }
+    let buffers = FrameBuffers {
+        width,
+        height,
+        planes: vec![
+            plane(0, width, height, 0, 0, y.clone()),
+            plane(1, width, height, 0, 0, u.clone()),
+            plane(2, width, height, 0, 0, v.clone()),
+        ],
+    };
+    let options = EncoderOptions {
+        lossless: true,
+        pixel_information: Some(PixelInformation {
+            bits_per_channel: vec![8, 8, 8],
+            extended_channels: None,
+        }),
+        ..EncoderOptions::default()
+    };
+    let input = temporary_path("avif");
+    fs::write(&input, encode_frame_bytes(&buffers, &options).unwrap()).unwrap();
+    let expected = y
+        .iter()
+        .chain(u.iter())
+        .chain(v.iter())
+        .map(|sample| *sample as u8)
+        .collect::<Vec<_>>();
+    assert_ffmpeg_raw_decode_equals(&ffmpeg, &input, "gbrp", &expected);
+    let _ = fs::remove_file(input);
 }
 
 #[test]

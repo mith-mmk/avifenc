@@ -125,6 +125,108 @@ fn full_resolution_color_blocks_can_use_lossless_palette_coding() {
 }
 
 #[test]
+fn lossless_palette_coding_supports_more_than_two_colors() {
+    let width: usize = 128;
+    let height: usize = 128;
+    let rgba = (0..width * height)
+        .flat_map(|index| {
+            let green = ((index / width / 8 + index % width / 8) % 4) as u8 * 85;
+            [32, green, 128, u8::MAX]
+        })
+        .collect();
+    let encoded = encode_bytes(
+        &ImageBuffer {
+            width,
+            height,
+            rgba,
+        },
+        &EncoderOptions {
+            lossless: true,
+            ..EncoderOptions::default()
+        },
+    )
+    .unwrap();
+    assert!(encoded.len() < 2 * 1024);
+}
+
+#[test]
+fn native_444_uv_palette_coding_is_available() {
+    let width = 64;
+    let height = 64;
+    let y = vec![128; width * height];
+    let pairs = [(32u16, 64u16), (96, 128), (160, 192), (224, 32)];
+    let mut u = Vec::with_capacity(width * height);
+    let mut v = Vec::with_capacity(width * height);
+    for y_pos in 0..height {
+        for x_pos in 0..width {
+            let (u_value, v_value) = pairs[(x_pos / 8 + y_pos / 8) % pairs.len()];
+            u.push(u_value);
+            v.push(v_value);
+        }
+    }
+    let encoded = encode_frame_bytes(
+        &FrameBuffers {
+            width,
+            height,
+            planes: vec![
+                plane(0, width, height, 0, 0, y),
+                plane(1, width, height, 0, 0, u),
+                plane(2, width, height, 0, 0, v),
+            ],
+        },
+        &EncoderOptions {
+            lossless: true,
+            pixel_information: Some(PixelInformation {
+                bits_per_channel: vec![8, 8, 8],
+                extended_channels: None,
+            }),
+            ..EncoderOptions::default()
+        },
+    )
+    .unwrap();
+    assert!(encoded.len() < 2 * 1024);
+}
+
+#[test]
+fn native_444_superblock_edge_uv_rdo_stays_compact() {
+    let width = 96;
+    let height = 64;
+    let y = vec![128; width * height];
+    let make_plane = |ax: i32, ay: i32| {
+        (0..width * height)
+            .map(|index| {
+                let x = (index % width) as i32;
+                let y = (index / width) as i32;
+                let texture = (x * 3 + y * 5).rem_euclid(7) - 3;
+                (128 + ax * (x - 48) / 4 + ay * (y - 32) / 4 + texture).clamp(0, 255) as u16
+            })
+            .collect::<Vec<_>>()
+    };
+    let encoded = encode_frame_bytes(
+        &FrameBuffers {
+            width,
+            height,
+            planes: vec![
+                plane(0, width, height, 0, 0, y),
+                plane(1, width, height, 0, 0, make_plane(-3, -3)),
+                plane(2, width, height, 0, 0, make_plane(-2, -3)),
+            ],
+        },
+        &EncoderOptions {
+            lossless: true,
+            pixel_information: Some(PixelInformation {
+                bits_per_channel: vec![8, 8, 8],
+                extended_channels: None,
+            }),
+            ..EncoderOptions::default()
+        },
+    )
+    .unwrap();
+    eprintln!("superblock-edge fixture bytes={}", encoded.len());
+    assert!(encoded.len() < 32 * 1024);
+}
+
+#[test]
 fn rgba_odd_dimensions_encode_without_chroma_padding_bias() {
     let image = ImageBuffer {
         width: 1,

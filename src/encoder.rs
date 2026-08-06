@@ -442,12 +442,12 @@ fn encode_planes_with_prediction(
 }
 
 fn apply_compression_defaults(config: &mut Rav1eEncoderConfig, options: &EncoderOptions) {
-    // libavif's speed scale still permits rate-distortion transform search and
-    // pixel-domain distortion at its faster presets. Keep the
-    // compression-oriented rav1e settings on all presets unless the caller
-    // explicitly selects the backend alternatives. Bottom-up partition
-    // decisions are also consistently better for still-image rate/distortion
-    // on the libavif comparison corpus.
+    // Match libavif's still-image comparison metric with rav1e's pixel-domain
+    // PSNR RDO by default. The public advanced `tune` option is applied after
+    // this function and can explicitly restore psychovisual tuning. Bottom-up
+    // partition decisions and the compression-oriented transform settings are
+    // kept on all presets unless the caller selects backend alternatives.
+    config.tune = Tune::Psnr;
     let has_rdo_setting = options
         .advanced
         .keys()
@@ -1242,19 +1242,53 @@ fn quality_to_quantizer(quality: u8) -> usize {
     ((100 - quality) * 255 + 50) as usize / 100
 }
 
-fn quality_to_quantizer_for_options(quality: u8, speed: u8) -> usize {
-    // libavif's current libaom still-image path uses image-quality tuning.
-    // rav1e's psychovisual RDO has a wider rate/distortion curve in the
-    // middle quality range at the slower presets. Calibrate that range by
-    // two public quality points, where the comparison corpus shows the
-    // largest byte-rate gap. Keep the exact codec mapping at q75/q90 and at
-    // the faster presets so the speed and high-quality behavior remain
-    // compatible with the existing API contract.
-    let calibrated_quality = if speed <= 6 && (50..=65).contains(&quality) {
-        quality.saturating_sub(2)
-    } else {
-        quality
-    };
+fn quality_to_quantizer_for_options(quality: u8, _speed: u8) -> usize {
+    // libavif's public quality scale is calibrated against libaom's still
+    // image curve, while this crate's lossy path uses rav1e.  The direct
+    // 0..=100-to-0..=255 mapping therefore spends too many bits at low and
+    // medium-low public qcolor values.  Use a monotone, piecewise-linear
+    // codec-scale correction derived from a cross-image rate/distortion
+    // curve.  The anchors are public-quality values, not image-specific
+    // thresholds; interpolation keeps every input on the same curve and
+    // avoids a discontinuity at the quality presets used by libavif.
+    const CALIBRATION: [(u8, u8); 15] = [
+        (0, 0),
+        (10, 10),
+        (15, 13),
+        (20, 16),
+        (25, 18),
+        (30, 23),
+        (35, 27),
+        (40, 30),
+        (45, 35),
+        (50, 40),
+        (75, 65),
+        (85, 80),
+        (90, 85),
+        (95, 90),
+        (100, 100),
+    ];
+    let calibrated_quality = CALIBRATION
+        .windows(2)
+        .find_map(|window| {
+            let [
+                (low_quality, low_calibrated),
+                (high_quality, high_calibrated),
+            ] = window
+            else {
+                unreachable!("quality calibration windows have two entries")
+            };
+            if quality > *high_quality {
+                return None;
+            }
+            let quality_span = u16::from(*high_quality - *low_quality);
+            let calibrated_span = u16::from(*high_calibrated - *low_calibrated);
+            let quality_offset = u16::from(quality - *low_quality);
+            let interpolated = u16::from(*low_calibrated)
+                + (calibrated_span * quality_offset + quality_span / 2) / quality_span;
+            Some(interpolated as u8)
+        })
+        .unwrap_or(100);
     quality_to_quantizer(calibrated_quality)
 }
 
@@ -1776,7 +1810,7 @@ mod tests {
     use crate::EncoderOptions;
     use crate::compat::DataMap;
     use crate::compat::Metadata;
-    use rav1e::prelude::{EncoderConfig as Rav1eEncoderConfig, SegmentationLevel};
+    use rav1e::prelude::{EncoderConfig as Rav1eEncoderConfig, SegmentationLevel, Tune};
 
     #[test]
     fn quality_mapping_matches_libavif_rav1e_backend() {
@@ -1804,12 +1838,22 @@ mod tests {
     }
 
     #[test]
-    fn quality_calibration_is_limited_to_slow_middle_quality_presets() {
-        assert_eq!(quality_to_quantizer_for_options(60, 6), 107);
-        assert_eq!(quality_to_quantizer_for_options(60, 10), 102);
-        assert_eq!(quality_to_quantizer_for_options(75, 6), 64);
-        assert_eq!(quality_to_quantizer_for_options(90, 6), 26);
-        assert_eq!(quality_to_quantizer_for_options(60, 7), 102);
+    fn quality_calibration_is_content_independent_across_speed_presets() {
+        assert_eq!(quality_to_quantizer_for_options(20, 6), 214);
+        assert_eq!(quality_to_quantizer_for_options(30, 10), 196);
+        assert_eq!(quality_to_quantizer_for_options(60, 6), 128);
+        assert_eq!(quality_to_quantizer_for_options(60, 10), 128);
+        assert_eq!(quality_to_quantizer_for_options(75, 6), 89);
+        assert_eq!(quality_to_quantizer_for_options(90, 6), 38);
+        assert_eq!(quality_to_quantizer_for_options(90, 10), 38);
+
+        for quality in 0..=100 {
+            assert!(
+                quality_to_quantizer_for_options(quality, 10)
+                    >= quality_to_quantizer_for_options(quality.saturating_add(1), 10),
+                "quality calibration must remain monotone at quality={quality}"
+            );
+        }
     }
 
     #[test]
@@ -1825,6 +1869,7 @@ mod tests {
         let options = EncoderOptions::default();
         let mut config = Rav1eEncoderConfig::with_speed_preset(options.speed);
         apply_compression_defaults(&mut config, &options);
+        assert_eq!(config.tune, Tune::Psnr);
         assert!(config.speed_settings.transform.rdo_tx_decision);
         assert!(!config.speed_settings.transform.reduced_tx_set);
         assert!(!config.speed_settings.transform.tx_domain_distortion);
@@ -1837,6 +1882,7 @@ mod tests {
         };
         let mut config = Rav1eEncoderConfig::with_speed_preset(options.speed);
         apply_compression_defaults(&mut config, &options);
+        assert_eq!(config.tune, Tune::Psnr);
         assert!(config.speed_settings.transform.rdo_tx_decision);
         assert!(!config.speed_settings.transform.reduced_tx_set);
         assert!(!config.speed_settings.transform.tx_domain_distortion);
@@ -1871,6 +1917,18 @@ mod tests {
             DataMap::Ascii("false".to_string()),
         );
         assert!(!should_try_complete_keyframe_search(&options));
+    }
+
+    #[test]
+    fn explicit_tune_overrides_the_psnr_compression_default() {
+        let options = Metadata::from([(
+            "tune".to_string(),
+            DataMap::Ascii("psychovisual".to_string()),
+        )]);
+        let mut config = Rav1eEncoderConfig::with_speed_preset(6);
+        apply_compression_defaults(&mut config, &EncoderOptions::default());
+        apply_advanced(&mut config, &options).unwrap();
+        assert_eq!(config.tune, Tune::Psychovisual);
     }
 
     #[test]
