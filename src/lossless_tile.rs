@@ -1442,8 +1442,13 @@ impl<'a> FrameEncoder<'a> {
         } else {
             normal_uv_mode
         };
+        let zero_angle_rate = if palette.is_none() {
+            mode_selection.rate
+        } else {
+            None
+        };
         let (normal_y_angle_delta, normal_uv_angle_delta) =
-            self.select_angle_deltas(r, c, bw, y_mode, normal_uv_mode);
+            self.select_angle_deltas(r, c, bw, y_mode, normal_uv_mode, zero_angle_rate);
         let y_angle_delta = if palette.as_ref().is_some_and(PaletteBlock::has_y) {
             0
         } else {
@@ -2603,6 +2608,7 @@ impl<'a> FrameEncoder<'a> {
         bw: usize,
         y_mode: u8,
         uv_mode: u8,
+        zero_angle_rate: Option<usize>,
     ) -> (i8, i8) {
         // AV1 signals angle_delta only for blocks at least 8x8.  Keeping the
         // guard here is important: a non-zero value would alter prediction
@@ -2610,31 +2616,47 @@ impl<'a> FrameEncoder<'a> {
         if bw < 8 {
             return (0, 0);
         }
-        let y_angle_delta = if is_directional_mode(y_mode) {
+        let (y_angle_delta, y_angle_rate) = if is_directional_mode(y_mode) {
             let mut best_delta = -3i8;
             let mut best_size = self.measure_block_modes_local_with_angles(
                 r, c, bw, y_mode, uv_mode, None, best_delta, 0,
             );
             for angle_delta in -2i8..=3 {
-                let size = self.measure_block_modes_local_with_limit(
-                    r,
-                    c,
-                    bw,
-                    y_mode,
-                    uv_mode,
-                    None,
-                    angle_delta,
-                    0,
-                    Some(best_size),
-                );
+                let size = if angle_delta == 0 {
+                    zero_angle_rate.unwrap_or_else(|| {
+                        self.measure_block_modes_local_with_limit(
+                            r,
+                            c,
+                            bw,
+                            y_mode,
+                            uv_mode,
+                            None,
+                            angle_delta,
+                            0,
+                            Some(best_size),
+                        )
+                    })
+                } else {
+                    self.measure_block_modes_local_with_limit(
+                        r,
+                        c,
+                        bw,
+                        y_mode,
+                        uv_mode,
+                        None,
+                        angle_delta,
+                        0,
+                        Some(best_size),
+                    )
+                };
                 if size < best_size {
                     best_delta = angle_delta;
                     best_size = size;
                 }
             }
-            best_delta
+            (best_delta, Some(best_size))
         } else {
-            0
+            (0, zero_angle_rate)
         };
         let uv_angle_delta = if !self.monochrome && is_directional_mode(uv_mode) {
             let mut best_delta = -3i8;
@@ -2649,17 +2671,33 @@ impl<'a> FrameEncoder<'a> {
                 best_delta,
             );
             for angle_delta in -2i8..=3 {
-                let size = self.measure_block_modes_local_with_limit(
-                    r,
-                    c,
-                    bw,
-                    y_mode,
-                    uv_mode,
-                    None,
-                    y_angle_delta,
-                    angle_delta,
-                    Some(best_size),
-                );
+                let size = if angle_delta == 0 {
+                    y_angle_rate.unwrap_or_else(|| {
+                        self.measure_block_modes_local_with_limit(
+                            r,
+                            c,
+                            bw,
+                            y_mode,
+                            uv_mode,
+                            None,
+                            y_angle_delta,
+                            angle_delta,
+                            Some(best_size),
+                        )
+                    })
+                } else {
+                    self.measure_block_modes_local_with_limit(
+                        r,
+                        c,
+                        bw,
+                        y_mode,
+                        uv_mode,
+                        None,
+                        y_angle_delta,
+                        angle_delta,
+                        Some(best_size),
+                    )
+                };
                 if size < best_size {
                     best_delta = angle_delta;
                     best_size = size;
