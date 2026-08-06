@@ -44,7 +44,7 @@ several AVIF quality/speed presets with FFmpeg's `libwebp` encoder at matching
 quality values and libavif's `avifenc` CLI:
 
 ```text
-cargo run --release --example benchmark -- \
+  cargo run --release --features multithread --example benchmark -- \
   input.rgba 1152 896 ffmpeg avifenc benchmark-output 1
 ```
 
@@ -75,3 +75,9 @@ avoids three-channel coding for monochrome images while preserving the AVIF
 container contract.
 Use executable paths for FFmpeg and libavif as the fourth and fifth arguments
 when they are not available on `PATH`.
+
+The optional `multithread` feature parallelizes the independent base and
+complete keyframe searches. It is disabled by default so targets such as
+WASM do not acquire native threading support implicitly. Explicit `jobs`
+settings retain the serial path; WML2 users can opt in with its existing
+`multithread` feature together with `avifenc`.

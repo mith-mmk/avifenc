@@ -306,13 +306,20 @@ fn encode_planes(
     bit_depth: u8,
     options: &EncoderOptions,
 ) -> Result<EncodedFrame, EncoderError> {
-    let base =
-        encode_planes_with_prediction(width, height, planes, sampling, bit_depth, options, false)?;
     if !should_try_complete_keyframe_search(options) {
-        return Ok(base);
+        return encode_planes_with_prediction(
+            width, height, planes, sampling, bit_depth, options, false,
+        );
     }
-    let complete =
-        encode_planes_with_prediction(width, height, planes, sampling, bit_depth, options, true)?;
+    #[cfg(feature = "multithread")]
+    let (base, complete) = if options.jobs == 0 {
+        encode_planes_parallel(width, height, planes, sampling, bit_depth, options)?
+    } else {
+        encode_planes_serial(width, height, planes, sampling, bit_depth, options)?
+    };
+    #[cfg(not(feature = "multithread"))]
+    let (base, complete) =
+        encode_planes_serial(width, height, planes, sampling, bit_depth, options)?;
     if complete.sequence_header.len() + complete.frame_payload.len()
         < base.sequence_header.len() + base.frame_payload.len()
     {
@@ -320,6 +327,48 @@ fn encode_planes(
     } else {
         Ok(base)
     }
+}
+
+fn encode_planes_serial(
+    width: usize,
+    height: usize,
+    planes: &[PlaneInput<'_>],
+    sampling: Sampling,
+    bit_depth: u8,
+    options: &EncoderOptions,
+) -> Result<(EncodedFrame, EncodedFrame), EncoderError> {
+    Ok((
+        encode_planes_with_prediction(width, height, planes, sampling, bit_depth, options, false)?,
+        encode_planes_with_prediction(width, height, planes, sampling, bit_depth, options, true)?,
+    ))
+}
+
+#[cfg(feature = "multithread")]
+fn encode_planes_parallel(
+    width: usize,
+    height: usize,
+    planes: &[PlaneInput<'_>],
+    sampling: Sampling,
+    bit_depth: u8,
+    options: &EncoderOptions,
+) -> Result<(EncodedFrame, EncodedFrame), EncoderError> {
+    std::thread::scope(|scope| {
+        let base_handle = scope.spawn(|| {
+            encode_planes_with_prediction(
+                width, height, planes, sampling, bit_depth, options, false,
+            )
+        });
+        let complete_handle = scope.spawn(|| {
+            encode_planes_with_prediction(width, height, planes, sampling, bit_depth, options, true)
+        });
+        let base = base_handle
+            .join()
+            .map_err(|_| EncoderError::Bitstream("base keyframe search panicked".to_string()))?;
+        let complete = complete_handle.join().map_err(|_| {
+            EncoderError::Bitstream("complete keyframe search panicked".to_string())
+        })?;
+        Ok::<_, EncoderError>((base?, complete?))
+    })
 }
 
 fn encode_planes_with_prediction(

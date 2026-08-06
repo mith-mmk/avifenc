@@ -43,6 +43,39 @@ fn rgba_alpha_is_written_as_an_auxiliary_item() {
 }
 
 #[test]
+fn parallel_complete_keyframe_search_matches_serial_search() {
+    let width = 16;
+    let height = 16;
+    let rgba = (0..width * height)
+        .flat_map(|index| {
+            let value = (index as u8).wrapping_mul(17);
+            [value, value.rotate_left(1), value.rotate_left(2), u8::MAX]
+        })
+        .collect();
+    let image = ImageBuffer {
+        width,
+        height,
+        rgba,
+    };
+    let parallel = EncoderOptions {
+        quality: 90,
+        quality_alpha: 90,
+        speed: 10,
+        jobs: 0,
+        ..EncoderOptions::default()
+    };
+    let serial = EncoderOptions {
+        jobs: 1,
+        ..parallel.clone()
+    };
+
+    assert_eq!(
+        encode_bytes(&image, &parallel).unwrap(),
+        encode_bytes(&image, &serial).unwrap()
+    );
+}
+
+#[test]
 fn grayscale_rgba_uses_a_monochrome_primary_item() {
     let rgba = [0u8, 32, 96, 255, 255, 128, 64, 16]
         .into_iter()
