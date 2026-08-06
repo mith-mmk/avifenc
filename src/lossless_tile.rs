@@ -507,6 +507,9 @@ pub(crate) struct FrameEncoder<'a> {
     mi_uv_palette_colors: Vec<[u16; 8]>,
     uv_palette_content: bool,
     screen_content_tools: bool,
+    /// Reusable CDF maps for RDO probes. Keeping the bucket allocation alive
+    /// avoids a fresh hash-table allocation for every candidate measurement.
+    probe_cdf_pool: Vec<CdfMap>,
 }
 
 type MiContext = (usize, u8, bool, u8, u8, [u16; 8], u8, [u16; 8]);
@@ -739,6 +742,7 @@ impl<'a> FrameEncoder<'a> {
             mi_uv_palette_colors: vec![[0; 8]; mi_cols * mi_rows],
             uv_palette_content,
             screen_content_tools,
+            probe_cdf_pool: Vec::new(),
         }
     }
 
@@ -1779,6 +1783,21 @@ impl<'a> FrameEncoder<'a> {
         self.measure_block_modes_local_with_angles(r, c, bw, y_mode, uv_mode, palette, 0, 0)
     }
 
+    fn begin_probe(&mut self, saved_rate: RateEstimator) -> AdaptiveSymbolEncoder {
+        let mut cdfs = self.probe_cdf_pool.pop().unwrap_or_default();
+        cdfs.clone_from(&self.sym.cdfs);
+        AdaptiveSymbolEncoder {
+            inner: None,
+            cdfs,
+            rate: saved_rate,
+        }
+    }
+
+    fn end_probe(&mut self, saved_sym: AdaptiveSymbolEncoder) {
+        let probe_sym = std::mem::replace(&mut self.sym, saved_sym);
+        self.probe_cdf_pool.push(probe_sym.cdfs);
+    }
+
     #[allow(clippy::too_many_arguments)]
     fn measure_block_modes_local_with_angles(
         &mut self,
@@ -1795,17 +1814,10 @@ impl<'a> FrameEncoder<'a> {
             return self.measure_leaf_block_modes_local(r, c, y_mode, uv_mode, palette);
         }
         let snapshot = self.snapshot_block_context(r, c, bw);
-        let cdfs = self.sym.cdfs.clone();
         let saved_rate = self.sym.rate.clone();
         let saved_rate_q10 = saved_rate.rate_q10();
-        let saved_sym = std::mem::replace(
-            &mut self.sym,
-            AdaptiveSymbolEncoder {
-                inner: None,
-                cdfs,
-                rate: saved_rate.clone(),
-            },
-        );
+        let probe_sym = self.begin_probe(saved_rate);
+        let saved_sym = std::mem::replace(&mut self.sym, probe_sym);
         self.encode_block_with_mode_shape_cfl(
             r,
             c,
@@ -1820,7 +1832,7 @@ impl<'a> FrameEncoder<'a> {
         );
         let size = (self.sym.rate.rate_q10() - saved_rate_q10) as usize;
         self.restore_block_context(snapshot);
-        self.sym = saved_sym;
+        self.end_probe(saved_sym);
         size
     }
 
@@ -1833,21 +1845,14 @@ impl<'a> FrameEncoder<'a> {
         palette: Option<PaletteBlock>,
     ) -> usize {
         let snapshot = self.snapshot_leaf_context(r, c);
-        let cdfs = self.sym.cdfs.clone();
         let saved_rate = self.sym.rate.clone();
         let saved_rate_q10 = saved_rate.rate_q10();
-        let saved_sym = std::mem::replace(
-            &mut self.sym,
-            AdaptiveSymbolEncoder {
-                inner: None,
-                cdfs,
-                rate: saved_rate.clone(),
-            },
-        );
+        let probe_sym = self.begin_probe(saved_rate);
+        let saved_sym = std::mem::replace(&mut self.sym, probe_sym);
         self.encode_block_with_mode(r, c, 4, palette, y_mode, uv_mode);
         let size = (self.sym.rate.rate_q10() - saved_rate_q10) as usize;
         self.restore_leaf_context(snapshot, r, c);
-        self.sym = saved_sym;
+        self.end_probe(saved_sym);
         size
     }
 
@@ -1952,21 +1957,14 @@ impl<'a> FrameEncoder<'a> {
         force_dc: bool,
     ) -> usize {
         let snapshot = self.snapshot_block_context(r, c, bw);
-        let cdfs = self.sym.cdfs.clone();
         let saved_rate = self.sym.rate.clone();
         let saved_rate_q10 = saved_rate.rate_q10();
-        let saved_sym = std::mem::replace(
-            &mut self.sym,
-            AdaptiveSymbolEncoder {
-                inner: None,
-                cdfs,
-                rate: saved_rate.clone(),
-            },
-        );
+        let probe_sym = self.begin_probe(saved_rate);
+        let saved_sym = std::mem::replace(&mut self.sym, probe_sym);
         self.encode_partition_choice(r, c, bw, partition, child_rdo_depth, force_dc);
         let size = (self.sym.rate.rate_q10() - saved_rate_q10) as usize;
         self.restore_block_context(snapshot);
-        self.sym = saved_sym;
+        self.end_probe(saved_sym);
         size
     }
 
