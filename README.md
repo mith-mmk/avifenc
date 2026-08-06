@@ -76,8 +76,9 @@ container contract.
 Use executable paths for FFmpeg and libavif as the fourth and fifth arguments
 when they are not available on `PATH`.
 
-The optional `multithread` feature parallelizes the independent base and
-complete keyframe searches. It is disabled by default so targets such as
-WASM do not acquire native threading support implicitly. Explicit `jobs`
-settings retain the serial path; WML2 users can opt in with its existing
-`multithread` feature together with `avifenc`.
+The optional `multithread` feature enables rav1e's native threading backend
+and parallelizes the independent base and complete keyframe candidates when
+the default `jobs=all` setting is used. The feature is disabled by default so
+targets such as WASM do not acquire native threading support implicitly.
+Explicit `jobs` settings retain the serial comparison path; WML2 users can
+opt in with its existing `multithread` feature together with `avifenc`.

@@ -973,7 +973,6 @@ impl<'a> FrameEncoder<'a> {
             && has_rows
             && has_cols
             && !self.block_is_skippable(r, c, bw, DC_PRED)
-            && self.exact_skip_mode(r, c, bw).is_none()
             // Large heuristic blocks still split to expose local predictors.
             // At 16x16 and 8x8, compare the complete NONE and SPLIT syntax;
             // forcing every textured block down to 4x4 spends far more mode

@@ -43,7 +43,7 @@ fn rgba_alpha_is_written_as_an_auxiliary_item() {
 }
 
 #[test]
-fn parallel_complete_keyframe_search_matches_serial_search() {
+fn complete_keyframe_search_matches_serial_search() {
     let width = 16;
     let height = 16;
     let rgba = (0..width * height)

@@ -17,6 +17,6 @@
   4:0:0/4:2:0/4:2:2/4:4:4 native planes, including FFmpeg bit-exact
   verification for subsampled planes, RGBA16 scaling, and an auxiliary alpha
   item; unsupported metadata combinations remain explicit errors.
-- Added the opt-in `multithread` feature. It parallelizes the independent
-  base and complete keyframe searches while keeping the default and WASM
-  configurations single-threaded.
+- Added the opt-in `multithread` feature. It enables rav1e's native threading
+  backend and parallelizes the independent base and complete keyframe
+  searches while keeping default/WASM builds single-threaded.

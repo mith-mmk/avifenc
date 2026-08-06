@@ -93,13 +93,14 @@ pub fn encode_bytes(
             width: image.width,
             height: image.height,
         }];
-        let primary = encode_planes(
+        let (primary, alpha) = encode_planes_with_alpha(
             image.width,
             image.height,
             &planes,
             Sampling::Cs400,
             8,
             options,
+            alpha.as_deref(),
         )?;
         (primary, alpha, 1)
     } else {
@@ -121,37 +122,16 @@ pub fn encode_bytes(
                 height: chroma_height(image.height),
             },
         ];
-        let primary = encode_planes(
+        let (primary, alpha) = encode_planes_with_alpha(
             image.width,
             image.height,
             &planes,
             Sampling::Cs420,
             8,
             options,
+            alpha.as_deref(),
         )?;
         (primary, alpha, 3)
-    };
-    let mut alpha_options = options.clone();
-    alpha_options.quality = options.quality_alpha;
-    alpha_options.color_information = None;
-    let alpha = alpha.map(|samples| {
-        let alpha_plane = [PlaneInput {
-            samples: &samples,
-            width: image.width,
-            height: image.height,
-        }];
-        encode_planes(
-            image.width,
-            image.height,
-            &alpha_plane,
-            Sampling::Cs400,
-            8,
-            &alpha_options,
-        )
-    });
-    let alpha = match alpha {
-        Some(result) => Some(result?),
-        None => None,
     };
     let effective = effective_image_options(options, channels, 8);
     write_avif(
@@ -228,13 +208,14 @@ pub fn encode_rgba16_bytes(
             width: image.width,
             height: image.height,
         }];
-        let primary = encode_planes(
+        let (primary, alpha) = encode_planes_with_alpha(
             image.width,
             image.height,
             &planes,
             Sampling::Cs400,
             bit_depth,
             options,
+            alpha.as_deref(),
         )?;
         (primary, alpha, 1)
     } else {
@@ -256,37 +237,16 @@ pub fn encode_rgba16_bytes(
                 height: chroma_height(image.height),
             },
         ];
-        let primary = encode_planes(
+        let (primary, alpha) = encode_planes_with_alpha(
             image.width,
             image.height,
             &planes,
             Sampling::Cs420,
             bit_depth,
             options,
+            alpha.as_deref(),
         )?;
         (primary, alpha, 3)
-    };
-    let mut alpha_options = options.clone();
-    alpha_options.quality = options.quality_alpha;
-    alpha_options.color_information = None;
-    let alpha = alpha.map(|samples| {
-        let alpha_plane = [PlaneInput {
-            samples: &samples,
-            width: image.width,
-            height: image.height,
-        }];
-        encode_planes(
-            image.width,
-            image.height,
-            &alpha_plane,
-            Sampling::Cs400,
-            bit_depth,
-            &alpha_options,
-        )
-    });
-    let alpha = match alpha {
-        Some(result) => Some(result?),
-        None => None,
     };
     let effective = effective_image_options(options, channels, bit_depth);
     write_avif(
@@ -341,6 +301,74 @@ fn encode_planes_serial(
         encode_planes_with_prediction(width, height, planes, sampling, bit_depth, options, false)?,
         encode_planes_with_prediction(width, height, planes, sampling, bit_depth, options, true)?,
     ))
+}
+
+fn encode_planes_with_alpha(
+    width: usize,
+    height: usize,
+    planes: &[PlaneInput<'_>],
+    sampling: Sampling,
+    bit_depth: u8,
+    options: &EncoderOptions,
+    alpha: Option<&[u16]>,
+) -> Result<(EncodedFrame, Option<EncodedFrame>), EncoderError> {
+    let mut alpha_options = options.clone();
+    alpha_options.quality = options.quality_alpha;
+    alpha_options.color_information = None;
+    let alpha_planes = alpha.map(|samples| {
+        [PlaneInput {
+            samples,
+            width,
+            height,
+        }]
+    });
+
+    #[cfg(feature = "multithread")]
+    if options.jobs == 0 {
+        return std::thread::scope(|scope| {
+            let primary_handle =
+                scope.spawn(|| encode_planes(width, height, planes, sampling, bit_depth, options));
+            let alpha_handle = alpha_planes.as_ref().map(|alpha_planes| {
+                scope.spawn(|| {
+                    encode_planes(
+                        width,
+                        height,
+                        alpha_planes,
+                        Sampling::Cs400,
+                        bit_depth,
+                        &alpha_options,
+                    )
+                })
+            });
+            let primary = primary_handle
+                .join()
+                .map_err(|_| EncoderError::Bitstream("color encode panicked".to_string()))??;
+            let alpha = alpha_handle
+                .map(|handle| {
+                    handle
+                        .join()
+                        .map_err(|_| EncoderError::Bitstream("alpha encode panicked".to_string()))?
+                })
+                .transpose()?;
+            Ok((primary, alpha))
+        });
+    }
+
+    let primary = encode_planes(width, height, planes, sampling, bit_depth, options)?;
+    let alpha = alpha_planes
+        .as_ref()
+        .map(|alpha_planes| {
+            encode_planes(
+                width,
+                height,
+                alpha_planes,
+                Sampling::Cs400,
+                bit_depth,
+                &alpha_options,
+            )
+        })
+        .transpose()?;
+    Ok((primary, alpha))
 }
 
 #[cfg(feature = "multithread")]
@@ -454,12 +482,15 @@ fn encode_planes_with_prediction(
         .map_err(|error| EncoderError::InvalidParam(error.to_string()))?;
     let mut frame = context.new_frame();
     for (index, plane) in planes.iter().enumerate() {
-        let bytes = plane
-            .samples
-            .iter()
-            .flat_map(|sample| sample.to_le_bytes())
-            .collect::<Vec<_>>();
-        frame.planes[index].copy_from_raw_u8(&bytes, plane.width * 2, 2);
+        let destination_stride = frame.planes[index].cfg.stride;
+        let destination = frame.planes[index].data_origin_mut();
+        for (destination_row, source_row) in destination
+            .chunks_exact_mut(destination_stride)
+            .take(plane.height)
+            .zip(plane.samples.chunks_exact(plane.width))
+        {
+            destination_row[..plane.width].copy_from_slice(source_row);
+        }
         // rav1e's plane padding takes the visible luma dimensions and applies
         // the plane's subsampling internally. Passing the already-subsampled
         // chroma dimensions leaves the right/bottom edge under-padded for odd
