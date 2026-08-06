@@ -555,6 +555,10 @@ pub(crate) struct FrameEncoder<'a> {
     /// current best candidate. Final encoding leaves it unset.
     probe_rate_limit: Option<u64>,
     probe_rate_limited: bool,
+    decision_trace_stack: Vec<Vec<BlockDecision>>,
+    decision_trace_active: bool,
+    capture_rdo_trace: bool,
+    block_replay: Option<BlockReplay>,
 }
 
 type MiContext = (usize, u8, bool, u8, u8, [u16; 8], u8, [u16; 8]);
@@ -566,6 +570,26 @@ struct ModeSelection {
     /// measuring the winning Y mode. Other shapes retain the old follow-up
     /// UV search and leave this unset.
     uv_mode: Option<u8>,
+}
+
+#[derive(Clone)]
+struct BlockDecision {
+    r: usize,
+    c: usize,
+    bw: usize,
+    bh: usize,
+    palette: Option<PaletteBlock>,
+    y_mode: u8,
+    uv_mode: u8,
+    y_angle_delta: i8,
+    uv_angle_delta: i8,
+    cfl: Option<(i8, i8)>,
+}
+
+struct BlockReplay {
+    decisions: Vec<BlockDecision>,
+    next: usize,
+    failed: bool,
 }
 
 struct BlockContextSnapshot {
@@ -798,6 +822,10 @@ impl<'a> FrameEncoder<'a> {
             screen_content_tools,
             probe_rate_limit: None,
             probe_rate_limited: false,
+            decision_trace_stack: Vec::new(),
+            decision_trace_active: false,
+            capture_rdo_trace: false,
+            block_replay: None,
         }
     }
 
@@ -925,6 +953,9 @@ impl<'a> FrameEncoder<'a> {
 
     fn encode_partition_rdo(&mut self, r: usize, c: usize, bw: usize, rdo_depth: u8) {
         let _timing = Guard::new(Kind::PartitionRdo);
+        let capture = self.decision_trace_stack.is_empty();
+        let previous_capture = self.capture_rdo_trace;
+        self.capture_rdo_trace = capture;
         let num4x4 = bw / 4;
         let half = num4x4 >> 1;
         let has_rows = r + half < self.mi_rows;
@@ -932,7 +963,9 @@ impl<'a> FrameEncoder<'a> {
         let child_depth = rdo_depth.saturating_sub(1);
         let crosses_visible_edge =
             r * 4 + bw > self.plane_heights[0] || c * 4 + bw > self.plane_widths[0];
-        let mut best = (self.measure_partition_local(r, c, bw, 0, 0, false), 0usize);
+        let (initial_size, mut best_trace) =
+            self.measure_partition_local_with_trace(r, c, bw, 0, 0, false);
+        let mut best = (initial_size, 0usize);
         if has_rows && has_cols {
             // Rectangular children are especially useful at 16×16, where
             // libaom frequently keeps one dimension at 8 pixels. Keep the
@@ -940,19 +973,35 @@ impl<'a> FrameEncoder<'a> {
             // RDO has enough coverage for larger blocks.
             if bw == 16 && !crosses_visible_edge {
                 for partition in [1usize, 2] {
-                    let size = self.measure_partition_local(r, c, bw, partition, 0, false);
+                    let (size, trace) =
+                        self.measure_partition_local_with_trace(r, c, bw, partition, 0, false);
                     if size < best.0 {
                         best = (size, partition);
+                        best_trace = trace;
                     }
                 }
             }
             let partition = 3;
-            let size = self.measure_partition_local(r, c, bw, partition, child_depth, false);
+            let (size, trace) =
+                self.measure_partition_local_with_trace(r, c, bw, partition, child_depth, false);
             if size < best.0 {
                 best = (size, partition);
+                best_trace = trace;
             }
         }
-        self.encode_partition_choice(r, c, bw, best.1, rdo_depth.saturating_sub(1), false);
+        self.capture_rdo_trace = previous_capture;
+        if capture && !best_trace.is_empty() {
+            let previous_replay = self.block_replay.take();
+            self.block_replay = Some(BlockReplay {
+                decisions: best_trace,
+                next: 0,
+                failed: false,
+            });
+            self.encode_partition_choice(r, c, bw, best.1, rdo_depth.saturating_sub(1), false);
+            self.block_replay = previous_replay;
+        } else {
+            self.encode_partition_choice(r, c, bw, best.1, rdo_depth.saturating_sub(1), false);
+        }
     }
 
     fn encode_partition_choice(
@@ -1194,11 +1243,77 @@ impl<'a> FrameEncoder<'a> {
         }
     }
 
+    fn record_block_decision(
+        &mut self,
+        r: usize,
+        c: usize,
+        bw: usize,
+        bh: usize,
+        palette: &Option<PaletteBlock>,
+        y_mode: u8,
+        uv_mode: u8,
+        y_angle_delta: i8,
+        uv_angle_delta: i8,
+        cfl: Option<(i8, i8)>,
+    ) {
+        if self.decision_trace_active
+            && let Some(trace) = self.decision_trace_stack.last_mut()
+        {
+            trace.push(BlockDecision {
+                r,
+                c,
+                bw,
+                bh,
+                palette: palette.clone(),
+                y_mode,
+                uv_mode,
+                y_angle_delta,
+                uv_angle_delta,
+                cfl,
+            });
+        }
+    }
+
+    fn take_replay_block_decision(
+        &mut self,
+        r: usize,
+        c: usize,
+        bw: usize,
+        bh: usize,
+    ) -> Option<BlockDecision> {
+        let replay = self.block_replay.as_mut()?;
+        if replay.failed {
+            return None;
+        }
+        let decision = replay.decisions.get(replay.next)?;
+        if (decision.r, decision.c, decision.bw, decision.bh) != (r, c, bw, bh) {
+            replay.failed = true;
+            return None;
+        }
+        replay.next += 1;
+        Some(decision.clone())
+    }
+
     fn encode_block(&mut self, r: usize, c: usize, bw: usize) {
         self.encode_block_shape(r, c, bw, bw);
     }
 
     fn encode_block_shape(&mut self, r: usize, c: usize, bw: usize, bh: usize) {
+        if let Some(decision) = self.take_replay_block_decision(r, c, bw, bh) {
+            self.encode_block_with_mode_shape_cfl(
+                r,
+                c,
+                bw,
+                bh,
+                decision.palette,
+                decision.y_mode,
+                decision.uv_mode,
+                decision.y_angle_delta,
+                decision.uv_angle_delta,
+                decision.cfl,
+            );
+            return;
+        }
         let palette_candidate = (bw == bh).then(|| self.palette_block(r, c, bw)).flatten();
         let mode_selection = if bw == bh {
             self.exact_skip_mode(r, c, bw)
@@ -1282,6 +1397,18 @@ impl<'a> FrameEncoder<'a> {
             None
         };
         let uv_mode = cfl.map_or(normal_uv_mode, |_| CFL_PRED);
+        self.record_block_decision(
+            r,
+            c,
+            bw,
+            bh,
+            &palette,
+            y_mode,
+            uv_mode,
+            y_angle_delta,
+            uv_angle_delta,
+            cfl,
+        );
         self.encode_block_with_mode_shape_cfl(
             r,
             c,
@@ -2122,7 +2249,26 @@ impl<'a> FrameEncoder<'a> {
         child_rdo_depth: u8,
         force_dc: bool,
     ) -> usize {
+        self.measure_partition_local_with_trace(r, c, bw, partition, child_rdo_depth, force_dc)
+            .0
+    }
+
+    fn measure_partition_local_with_trace(
+        &mut self,
+        r: usize,
+        c: usize,
+        bw: usize,
+        partition: usize,
+        child_rdo_depth: u8,
+        force_dc: bool,
+    ) -> (usize, Vec<BlockDecision>) {
         let _timing = Guard::new(Kind::PartitionMeasure);
+        let capture = self.capture_rdo_trace && self.decision_trace_stack.is_empty();
+        let previous_active = self.decision_trace_active;
+        if capture {
+            self.decision_trace_stack.push(Vec::new());
+            self.decision_trace_active = true;
+        }
         let snapshot = self.snapshot_block_context(r, c, bw);
         let saved_rate = self.sym.rate.clone();
         let saved_rate_q10 = saved_rate.rate_q10();
@@ -2131,7 +2277,15 @@ impl<'a> FrameEncoder<'a> {
         let size = (self.sym.rate.rate_q10() - saved_rate_q10) as usize;
         self.restore_block_context(snapshot);
         self.end_probe(checkpoint);
-        size
+        let trace = if capture {
+            self.decision_trace_active = previous_active;
+            self.decision_trace_stack
+                .pop()
+                .expect("decision trace stack must contain the active probe")
+        } else {
+            Vec::new()
+        };
+        (size, trace)
     }
 
     fn select_y_mode_shape(&mut self, r: usize, c: usize, bw: usize, bh: usize) -> ModeSelection {
