@@ -51,6 +51,7 @@ struct AdaptiveCdfState {
     values: [u16; MAX_ADAPTIVE_CDF_LEN],
     len: u8,
     count: u16,
+    adapt_base_rate: u8,
     journal_epoch: u64,
 }
 
@@ -66,6 +67,7 @@ impl AdaptiveCdfState {
             values,
             len: cdf.len() as u8,
             count: 0,
+            adapt_base_rate: (31 - (cdf.len() as u32).leading_zeros()).min(2) as u8,
             journal_epoch: 0,
         }
     }
@@ -76,6 +78,25 @@ impl AdaptiveCdfState {
 
     fn values_mut(&mut self) -> &mut [u16] {
         &mut self.values[..usize::from(self.len)]
+    }
+
+    #[inline]
+    fn adapt(&mut self, symbol: usize) {
+        let rate = 3
+            + u32::from(self.count > 15)
+            + u32::from(self.count > 31)
+            + u32::from(self.adapt_base_rate);
+        let body_len = usize::from(self.len) - 1;
+        let body = &mut self.values[..body_len];
+        for value in &mut body[..symbol] {
+            *value -= *value >> rate;
+        }
+        for value in &mut body[symbol..] {
+            *value += ((1u16 << 15) - *value) >> rate;
+        }
+        if self.count < 32 {
+            self.count += 1;
+        }
     }
 }
 
@@ -255,13 +276,13 @@ impl AdaptiveSymbolEncoder {
             state.journal_epoch = epoch;
         }
         self.rate.encode_symbol(symbol, state.values());
-        let mut count = state.count;
         if let Some(inner) = self.inner.as_mut() {
+            let mut count = state.count;
             inner.encode_symbol_adapt(symbol, state.values_mut(), &mut count);
+            state.count = count;
         } else {
-            adapt_cdf(state.values_mut(), symbol, &mut count);
+            state.adapt(symbol);
         }
-        state.count = count;
     }
 
     #[inline]
