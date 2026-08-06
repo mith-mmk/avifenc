@@ -572,6 +572,14 @@ struct ModeSelection {
     uv_mode: Option<u8>,
 }
 
+#[derive(Clone, Copy)]
+struct UvModeSelection {
+    mode: u8,
+    /// Exact rate from the probe that selected `mode`, when UV mode RDO was
+    /// used. Small blocks retain the cheap proxy search and leave this unset.
+    rate: Option<usize>,
+}
+
 #[derive(Clone)]
 struct BlockDecision {
     r: usize,
@@ -1243,6 +1251,7 @@ impl<'a> FrameEncoder<'a> {
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn record_block_decision(
         &mut self,
         r: usize,
@@ -1331,6 +1340,7 @@ impl<'a> FrameEncoder<'a> {
                 DC_PRED
             } else {
                 self.select_uv_mode_for_y_shape(r, c, bw, bh, normal_y_mode)
+                    .mode
             }
         });
         let (normal_y_angle_delta, normal_uv_angle_delta) =
@@ -2344,30 +2354,41 @@ impl<'a> FrameEncoder<'a> {
             candidates.iter().copied().skip(1).collect()
         };
         let mut best_mode = DC_PRED;
-        let initial_uv = if self.monochrome {
-            DC_PRED
+        let initial_uv_selection = if self.monochrome {
+            UvModeSelection {
+                mode: DC_PRED,
+                rate: None,
+            }
         } else {
-            self.select_uv_mode_for_y(r, c, bw, DC_PRED)
+            self.select_uv_mode_for_y_shape(r, c, bw, bw, DC_PRED)
         };
-        let mut best_uv_mode = initial_uv;
-        let mut best_size = self.measure_block_modes_local(r, c, bw, DC_PRED, initial_uv, None);
+        let mut best_uv_mode = initial_uv_selection.mode;
+        let mut best_size = initial_uv_selection.rate.unwrap_or_else(|| {
+            self.measure_block_modes_local(r, c, bw, DC_PRED, best_uv_mode, None)
+        });
         for mode in candidate_modes {
-            let uv_mode = if self.monochrome {
-                DC_PRED
+            let uv_selection = if self.monochrome {
+                UvModeSelection {
+                    mode: DC_PRED,
+                    rate: None,
+                }
             } else {
-                self.select_uv_mode_for_y(r, c, bw, mode)
+                self.select_uv_mode_for_y_shape(r, c, bw, bw, mode)
             };
-            let size = self.measure_block_modes_local_with_limit(
-                r,
-                c,
-                bw,
-                mode,
-                uv_mode,
-                None,
-                0,
-                0,
-                Some(best_size),
-            );
+            let uv_mode = uv_selection.mode;
+            let size = uv_selection.rate.unwrap_or_else(|| {
+                self.measure_block_modes_local_with_limit(
+                    r,
+                    c,
+                    bw,
+                    mode,
+                    uv_mode,
+                    None,
+                    0,
+                    0,
+                    Some(best_size),
+                )
+            });
             if size < best_size {
                 best_mode = mode;
                 best_size = size;
@@ -2381,7 +2402,40 @@ impl<'a> FrameEncoder<'a> {
     }
 
     fn select_uv_mode_for_y(&mut self, r: usize, c: usize, bw: usize, y_mode: u8) -> u8 {
-        self.select_uv_mode_for_y_shape(r, c, bw, bw, y_mode)
+        self.select_uv_mode_for_y_shape(r, c, bw, bw, y_mode).mode
+    }
+
+    fn select_uv_mode_candidates(
+        &mut self,
+        r: usize,
+        c: usize,
+        bw: usize,
+        y_mode: u8,
+        candidates: &[u8],
+    ) -> UvModeSelection {
+        let mut best_mode = candidates.first().copied().unwrap_or(DC_PRED);
+        let mut best_size = self.measure_block_modes_local(r, c, bw, y_mode, best_mode, None);
+        for &mode in candidates.iter().skip(1) {
+            let size = self.measure_block_modes_local_with_limit(
+                r,
+                c,
+                bw,
+                y_mode,
+                mode,
+                None,
+                0,
+                0,
+                Some(best_size),
+            );
+            if size < best_size {
+                best_mode = mode;
+                best_size = size;
+            }
+        }
+        UvModeSelection {
+            mode: best_mode,
+            rate: Some(best_size),
+        }
     }
 
     fn select_uv_mode_for_y_shape(
@@ -2391,15 +2445,21 @@ impl<'a> FrameEncoder<'a> {
         bw: usize,
         bh: usize,
         y_mode: u8,
-    ) -> u8 {
+    ) -> UvModeSelection {
         if bw != bh {
-            return DC_PRED;
+            return UvModeSelection {
+                mode: DC_PRED,
+                rate: None,
+            };
         }
         // The first UV RDO pass targets the full-resolution lossless path.
         // Subsampled chroma has different edge geometry and is kept on the
         // proven DC path until its reference construction is audited.
         if self.subsampling_x != 0 || self.subsampling_y != 0 {
-            return DC_PRED;
+            return UvModeSelection {
+                mode: DC_PRED,
+                rate: None,
+            };
         }
         if bw < 8 {
             let candidates = [
@@ -2416,11 +2476,14 @@ impl<'a> FrameEncoder<'a> {
                 SMOOTH_H_PRED,
                 PAETH_PRED,
             ];
-            return candidates
-                .iter()
-                .copied()
-                .min_by_key(|&mode| self.mode_cost_plane(1, r, c, bw, mode))
-                .unwrap_or(DC_PRED);
+            return UvModeSelection {
+                mode: candidates
+                    .iter()
+                    .copied()
+                    .min_by_key(|&mode| self.mode_cost_plane(1, r, c, bw, mode))
+                    .unwrap_or(DC_PRED),
+                rate: None,
+            };
         }
         // Directional modes can read extended edges across the superblock
         // guard. Keep those modes out of the exact probe at a superblock
@@ -2444,11 +2507,7 @@ impl<'a> FrameEncoder<'a> {
                 SMOOTH_H_PRED,
                 PAETH_PRED,
             ];
-            return candidates
-                .iter()
-                .copied()
-                .min_by_key(|&mode| self.mode_cost_plane(1, r, c, bw, mode))
-                .unwrap_or(DC_PRED);
+            return self.select_uv_mode_candidates(r, c, bw, y_mode, &candidates);
         }
         if r.is_multiple_of(16) || c.is_multiple_of(16) {
             let candidates = [
@@ -2460,11 +2519,7 @@ impl<'a> FrameEncoder<'a> {
                 SMOOTH_H_PRED,
                 PAETH_PRED,
             ];
-            return candidates
-                .iter()
-                .copied()
-                .min_by_key(|&mode| self.measure_block_modes_local(r, c, bw, y_mode, mode, None))
-                .unwrap_or(DC_PRED);
+            return self.select_uv_mode_candidates(r, c, bw, y_mode, &candidates);
         }
         let candidates = if bw < 16 {
             vec![
@@ -2496,11 +2551,7 @@ impl<'a> FrameEncoder<'a> {
                 SMOOTH_H_PRED,
             ]
         };
-        candidates
-            .iter()
-            .copied()
-            .min_by_key(|&mode| self.measure_block_modes_local(r, c, bw, y_mode, mode, None))
-            .unwrap_or(DC_PRED)
+        self.select_uv_mode_candidates(r, c, bw, y_mode, &candidates)
     }
 
     fn select_angle_deltas(
@@ -2518,38 +2569,61 @@ impl<'a> FrameEncoder<'a> {
             return (0, 0);
         }
         let y_angle_delta = if is_directional_mode(y_mode) {
-            (-3i8..=3)
-                .min_by_key(|&angle_delta| {
-                    self.measure_block_modes_local_with_angles(
-                        r,
-                        c,
-                        bw,
-                        y_mode,
-                        uv_mode,
-                        None,
-                        angle_delta,
-                        0,
-                    )
-                })
-                .unwrap_or(0)
+            let mut best_delta = -3i8;
+            let mut best_size = self.measure_block_modes_local_with_angles(
+                r, c, bw, y_mode, uv_mode, None, best_delta, 0,
+            );
+            for angle_delta in -2i8..=3 {
+                let size = self.measure_block_modes_local_with_limit(
+                    r,
+                    c,
+                    bw,
+                    y_mode,
+                    uv_mode,
+                    None,
+                    angle_delta,
+                    0,
+                    Some(best_size),
+                );
+                if size < best_size {
+                    best_delta = angle_delta;
+                    best_size = size;
+                }
+            }
+            best_delta
         } else {
             0
         };
         let uv_angle_delta = if !self.monochrome && is_directional_mode(uv_mode) {
-            (-3i8..=3)
-                .min_by_key(|&angle_delta| {
-                    self.measure_block_modes_local_with_angles(
-                        r,
-                        c,
-                        bw,
-                        y_mode,
-                        uv_mode,
-                        None,
-                        y_angle_delta,
-                        angle_delta,
-                    )
-                })
-                .unwrap_or(0)
+            let mut best_delta = -3i8;
+            let mut best_size = self.measure_block_modes_local_with_angles(
+                r,
+                c,
+                bw,
+                y_mode,
+                uv_mode,
+                None,
+                y_angle_delta,
+                best_delta,
+            );
+            for angle_delta in -2i8..=3 {
+                let size = self.measure_block_modes_local_with_limit(
+                    r,
+                    c,
+                    bw,
+                    y_mode,
+                    uv_mode,
+                    None,
+                    y_angle_delta,
+                    angle_delta,
+                    Some(best_size),
+                );
+                if size < best_size {
+                    best_delta = angle_delta;
+                    best_size = size;
+                }
+            }
+            best_delta
         } else {
             0
         };
