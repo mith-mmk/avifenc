@@ -551,9 +551,22 @@ pub(crate) struct FrameEncoder<'a> {
     mi_uv_palette_colors: Vec<[u16; 8]>,
     uv_palette_content: bool,
     screen_content_tools: bool,
+    /// Absolute rate limit used to stop a mode probe that cannot beat the
+    /// current best candidate. Final encoding leaves it unset.
+    probe_rate_limit: Option<u64>,
+    probe_rate_limited: bool,
 }
 
 type MiContext = (usize, u8, bool, u8, u8, [u16; 8], u8, [u16; 8]);
+
+#[derive(Clone, Copy)]
+struct ModeSelection {
+    y_mode: u8,
+    /// Full-resolution square blocks already selected their UV mode while
+    /// measuring the winning Y mode. Other shapes retain the old follow-up
+    /// UV search and leave this unset.
+    uv_mode: Option<u8>,
+}
 
 struct BlockContextSnapshot {
     planes: Vec<PlaneBlockContextSnapshot>,
@@ -783,6 +796,8 @@ impl<'a> FrameEncoder<'a> {
             mi_uv_palette_colors: vec![[0; 8]; mi_cols * mi_rows],
             uv_palette_content,
             screen_content_tools,
+            probe_rate_limit: None,
+            probe_rate_limited: false,
         }
     }
 
@@ -1185,17 +1200,24 @@ impl<'a> FrameEncoder<'a> {
 
     fn encode_block_shape(&mut self, r: usize, c: usize, bw: usize, bh: usize) {
         let palette_candidate = (bw == bh).then(|| self.palette_block(r, c, bw)).flatten();
-        let normal_y_mode = if bw == bh {
+        let mode_selection = if bw == bh {
             self.exact_skip_mode(r, c, bw)
+                .map(|y_mode| ModeSelection {
+                    y_mode,
+                    uv_mode: None,
+                })
+                .unwrap_or_else(|| self.select_y_mode_shape(r, c, bw, bh))
         } else {
-            None
-        }
-        .unwrap_or_else(|| self.select_y_mode_shape(r, c, bw, bh));
-        let normal_uv_mode = if self.monochrome {
-            DC_PRED
-        } else {
-            self.select_uv_mode_for_y_shape(r, c, bw, bh, normal_y_mode)
+            self.select_y_mode_shape(r, c, bw, bh)
         };
+        let normal_y_mode = mode_selection.y_mode;
+        let normal_uv_mode = mode_selection.uv_mode.unwrap_or_else(|| {
+            if self.monochrome {
+                DC_PRED
+            } else {
+                self.select_uv_mode_for_y_shape(r, c, bw, bh, normal_y_mode)
+            }
+        });
         let (normal_y_angle_delta, normal_uv_angle_delta) =
             self.select_angle_deltas(r, c, bw, normal_y_mode, normal_uv_mode);
         let palette = palette_candidate.and_then(|candidate| {
@@ -1328,6 +1350,9 @@ impl<'a> FrameEncoder<'a> {
         cfl: Option<(i8, i8)>,
     ) {
         let _timing = Guard::new(Kind::BlockEncode);
+        if self.probe_rate_limit_reached() {
+            return;
+        }
         let n4_x = bw / 4;
         let n4_y = bh / 4;
         let bsl = n4_x.trailing_zeros() as u8;
@@ -1480,16 +1505,28 @@ impl<'a> FrameEncoder<'a> {
         } else {
             self.encode_plane_unit(0, r, c, bw, bh, y_mode, y_angle_delta, None);
         }
+        if self.probe_rate_limit_reached() {
+            return;
+        }
         if chroma_reference {
             if has_uv_palette {
                 self.encode_palette_plane_unit(1, r, c, bw, bh);
+                if self.probe_rate_limit_reached() {
+                    return;
+                }
                 self.encode_palette_plane_unit(2, r, c, bw, bh);
             } else {
                 if let Some((alpha_u, alpha_v)) = cfl {
                     self.encode_plane_unit(1, r, c, bw, bh, DC_PRED, uv_angle_delta, Some(alpha_u));
+                    if self.probe_rate_limit_reached() {
+                        return;
+                    }
                     self.encode_plane_unit(2, r, c, bw, bh, DC_PRED, uv_angle_delta, Some(alpha_v));
                 } else {
                     self.encode_plane_unit(1, r, c, bw, bh, uv_mode, uv_angle_delta, None);
+                    if self.probe_rate_limit_reached() {
+                        return;
+                    }
                     self.encode_plane_unit(2, r, c, bw, bh, uv_mode, uv_angle_delta, None);
                 }
             }
@@ -1826,7 +1863,58 @@ impl<'a> FrameEncoder<'a> {
         uv_mode: u8,
         palette: Option<PaletteBlock>,
     ) -> usize {
-        self.measure_block_modes_local_with_angles(r, c, bw, y_mode, uv_mode, palette, 0, 0)
+        self.measure_block_modes_local_with_limit(r, c, bw, y_mode, uv_mode, palette, 0, 0, None)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn measure_block_modes_local_with_limit(
+        &mut self,
+        r: usize,
+        c: usize,
+        bw: usize,
+        y_mode: u8,
+        uv_mode: u8,
+        palette: Option<PaletteBlock>,
+        y_angle_delta: i8,
+        uv_angle_delta: i8,
+        limit: Option<usize>,
+    ) -> usize {
+        if bw == 4 {
+            return self
+                .measure_leaf_block_modes_local_with_limit(r, c, y_mode, uv_mode, palette, limit);
+        }
+        let _timing = Guard::new(Kind::BlockMeasure);
+        let snapshot = self.snapshot_block_context(r, c, bw);
+        let saved_rate = self.sym.rate.clone();
+        let saved_rate_q10 = saved_rate.rate_q10();
+        let previous_limit = self.probe_rate_limit;
+        let previous_limited = self.probe_rate_limited;
+        let checkpoint = self.begin_probe(saved_rate);
+        self.probe_rate_limit = limit
+            .map(|value| saved_rate_q10.saturating_add(u64::try_from(value).unwrap_or(u64::MAX)));
+        self.probe_rate_limited = false;
+        self.encode_block_with_mode_shape_cfl(
+            r,
+            c,
+            bw,
+            bw,
+            palette,
+            y_mode,
+            uv_mode,
+            y_angle_delta,
+            uv_angle_delta,
+            None,
+        );
+        let size = if self.probe_rate_limited {
+            limit.unwrap_or(usize::MAX)
+        } else {
+            (self.sym.rate.rate_q10() - saved_rate_q10) as usize
+        };
+        self.restore_block_context(snapshot);
+        self.end_probe(checkpoint);
+        self.probe_rate_limit = previous_limit;
+        self.probe_rate_limited = previous_limited;
+        size
     }
 
     fn begin_probe(&mut self, saved_rate: RateEstimator) -> ProbeCheckpoint {
@@ -1866,6 +1954,17 @@ impl<'a> FrameEncoder<'a> {
         self.sym.probe_epoch = checkpoint.previous_epoch;
     }
 
+    #[inline]
+    fn probe_rate_limit_reached(&mut self) -> bool {
+        if !self.probe_rate_limited
+            && let Some(limit) = self.probe_rate_limit
+            && self.sym.rate.rate_q10() >= limit
+        {
+            self.probe_rate_limited = true;
+        }
+        self.probe_rate_limited
+    }
+
     #[allow(clippy::too_many_arguments)]
     fn measure_block_modes_local_with_angles(
         &mut self,
@@ -1878,49 +1977,48 @@ impl<'a> FrameEncoder<'a> {
         y_angle_delta: i8,
         uv_angle_delta: i8,
     ) -> usize {
-        let _timing = Guard::new(Kind::BlockMeasure);
-        if bw == 4 {
-            return self.measure_leaf_block_modes_local(r, c, y_mode, uv_mode, palette);
-        }
-        let snapshot = self.snapshot_block_context(r, c, bw);
-        let saved_rate = self.sym.rate.clone();
-        let saved_rate_q10 = saved_rate.rate_q10();
-        let checkpoint = self.begin_probe(saved_rate);
-        self.encode_block_with_mode_shape_cfl(
+        self.measure_block_modes_local_with_limit(
             r,
             c,
             bw,
-            bw,
-            palette,
             y_mode,
             uv_mode,
+            palette,
             y_angle_delta,
             uv_angle_delta,
             None,
-        );
-        let size = (self.sym.rate.rate_q10() - saved_rate_q10) as usize;
-        self.restore_block_context(snapshot);
-        self.end_probe(checkpoint);
-        size
+        )
     }
 
-    fn measure_leaf_block_modes_local(
+    fn measure_leaf_block_modes_local_with_limit(
         &mut self,
         r: usize,
         c: usize,
         y_mode: u8,
         uv_mode: u8,
         palette: Option<PaletteBlock>,
+        limit: Option<usize>,
     ) -> usize {
         let _timing = Guard::new(Kind::BlockMeasure);
         let snapshot = self.snapshot_leaf_context(r, c);
         let saved_rate = self.sym.rate.clone();
         let saved_rate_q10 = saved_rate.rate_q10();
+        let previous_limit = self.probe_rate_limit;
+        let previous_limited = self.probe_rate_limited;
         let checkpoint = self.begin_probe(saved_rate);
+        self.probe_rate_limit = limit
+            .map(|value| saved_rate_q10.saturating_add(u64::try_from(value).unwrap_or(u64::MAX)));
+        self.probe_rate_limited = false;
         self.encode_block_with_mode(r, c, 4, palette, y_mode, uv_mode);
-        let size = (self.sym.rate.rate_q10() - saved_rate_q10) as usize;
+        let size = if self.probe_rate_limited {
+            limit.unwrap_or(usize::MAX)
+        } else {
+            (self.sym.rate.rate_q10() - saved_rate_q10) as usize
+        };
         self.restore_leaf_context(snapshot, r, c);
         self.end_probe(checkpoint);
+        self.probe_rate_limit = previous_limit;
+        self.probe_rate_limited = previous_limited;
         size
     }
 
@@ -2036,17 +2134,23 @@ impl<'a> FrameEncoder<'a> {
         size
     }
 
-    fn select_y_mode_shape(&mut self, r: usize, c: usize, bw: usize, bh: usize) -> u8 {
+    fn select_y_mode_shape(&mut self, r: usize, c: usize, bw: usize, bh: usize) -> ModeSelection {
         let _timing = Guard::new(Kind::ModeSearch);
         if bw != bh {
-            return DC_PRED;
+            return ModeSelection {
+                y_mode: DC_PRED,
+                uv_mode: None,
+            };
         }
         // Keep subsampled lossless planes on the proven DC path for now.  In
         // those modes the luma/chroma reference grid has additional
         // alignment rules; the directional search is enabled first for
         // full-resolution identity planes where the reference is direct.
         if self.subsampling_x != 0 || self.subsampling_y != 0 {
-            return DC_PRED;
+            return ModeSelection {
+                y_mode: DC_PRED,
+                uv_mode: None,
+            };
         }
         // Boundary references use the decoder-visible reconstructed coded
         // grid, including its edge extension. They are safe to search just
@@ -2083,7 +2187,7 @@ impl<'a> FrameEncoder<'a> {
                 .map(|(_, mode)| mode)
                 .collect::<Vec<_>>()
         } else {
-            candidates.to_vec()
+            candidates.iter().copied().skip(1).collect()
         };
         let mut best_mode = DC_PRED;
         let initial_uv = if self.monochrome {
@@ -2091,6 +2195,7 @@ impl<'a> FrameEncoder<'a> {
         } else {
             self.select_uv_mode_for_y(r, c, bw, DC_PRED)
         };
+        let mut best_uv_mode = initial_uv;
         let mut best_size = self.measure_block_modes_local(r, c, bw, DC_PRED, initial_uv, None);
         for mode in candidate_modes {
             let uv_mode = if self.monochrome {
@@ -2098,13 +2203,27 @@ impl<'a> FrameEncoder<'a> {
             } else {
                 self.select_uv_mode_for_y(r, c, bw, mode)
             };
-            let size = self.measure_block_modes_local(r, c, bw, mode, uv_mode, None);
+            let size = self.measure_block_modes_local_with_limit(
+                r,
+                c,
+                bw,
+                mode,
+                uv_mode,
+                None,
+                0,
+                0,
+                Some(best_size),
+            );
             if size < best_size {
                 best_mode = mode;
                 best_size = size;
+                best_uv_mode = uv_mode;
             }
         }
-        best_mode
+        ModeSelection {
+            y_mode: best_mode,
+            uv_mode: Some(best_uv_mode),
+        }
     }
 
     fn select_uv_mode_for_y(&mut self, r: usize, c: usize, bw: usize, y_mode: u8) -> u8 {
@@ -2847,6 +2966,9 @@ impl<'a> FrameEncoder<'a> {
         let n_y = unit_h.div_ceil(4);
         for ty in 0..n_y {
             for tx in 0..n_x {
+                if self.probe_rate_limit_reached() {
+                    return;
+                }
                 let px = sx + tx * 4;
                 let py = sy + ty * 4;
                 if px >= self.plane_coded_widths[plane] || py >= self.plane_coded_heights[plane] {
@@ -2887,6 +3009,9 @@ impl<'a> FrameEncoder<'a> {
         let n_y = unit_h.div_ceil(4);
         for ty in 0..n_y {
             for tx in 0..n_x {
+                if self.probe_rate_limit_reached() {
+                    return;
+                }
                 let px = sx + tx * 4;
                 let py = sy + ty * 4;
                 if px >= self.plane_coded_widths[plane] || py >= self.plane_coded_heights[plane] {
