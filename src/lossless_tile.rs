@@ -42,6 +42,7 @@ impl Hasher for CdfKeyHasher {
 }
 
 const MAX_ADAPTIVE_CDF_LEN: usize = 16;
+const CDF_CACHE_SIZE: usize = 256;
 const MAX_BLOCK_DECODED_CELLS: usize = 16 * 16;
 const BLOCK_DECODED_SNAPSHOT_WORDS: usize = MAX_BLOCK_DECODED_CELLS / u64::BITS as usize;
 
@@ -78,7 +79,14 @@ impl AdaptiveCdfState {
     }
 }
 
-type CdfMap = HashMap<usize, AdaptiveCdfState, BuildHasherDefault<CdfKeyHasher>>;
+type CdfIndexMap = HashMap<usize, usize, BuildHasherDefault<CdfKeyHasher>>;
+
+#[derive(Clone, Copy, Default)]
+struct CdfCacheEntry {
+    valid: bool,
+    key: usize,
+    index: usize,
+}
 
 /// AV1's range coder state used only for fractional-rate estimation.
 ///
@@ -194,7 +202,9 @@ impl RateEstimator {
 #[derive(Clone)]
 struct AdaptiveSymbolEncoder {
     inner: Option<RangeEncoder>,
-    cdfs: CdfMap,
+    cdf_indices: CdfIndexMap,
+    cdf_states: Vec<AdaptiveCdfState>,
+    cdf_cache: [CdfCacheEntry; CDF_CACHE_SIZE],
     rate: RateEstimator,
     cdf_journal: Vec<CdfUndo>,
     probe_epoch: Option<u64>,
@@ -203,8 +213,8 @@ struct AdaptiveSymbolEncoder {
 
 #[derive(Clone)]
 struct CdfUndo {
-    key: usize,
-    previous: Option<AdaptiveCdfState>,
+    index: usize,
+    previous: AdaptiveCdfState,
 }
 
 struct ProbeCheckpoint {
@@ -218,7 +228,9 @@ impl AdaptiveSymbolEncoder {
     fn new() -> Self {
         Self {
             inner: Some(RangeEncoder::new()),
-            cdfs: CdfMap::default(),
+            cdf_indices: CdfIndexMap::default(),
+            cdf_states: Vec::new(),
+            cdf_cache: [CdfCacheEntry::default(); CDF_CACHE_SIZE],
             rate: RateEstimator::new(),
             cdf_journal: Vec::new(),
             probe_epoch: None,
@@ -231,32 +243,17 @@ impl AdaptiveSymbolEncoder {
     }
 
     fn encode_symbol_with_key(&mut self, symbol: usize, cdf: &[u16], key: usize) {
-        let state = if let Some(epoch) = self.probe_epoch {
-            use std::collections::hash_map::Entry;
-            match self.cdfs.entry(key) {
-                Entry::Occupied(mut entry) => {
-                    if entry.get().journal_epoch != epoch {
-                        self.cdf_journal.push(CdfUndo {
-                            key,
-                            previous: Some(entry.get().clone()),
-                        });
-                        entry.get_mut().journal_epoch = epoch;
-                    }
-                    entry.into_mut()
-                }
-                Entry::Vacant(entry) => {
-                    self.cdf_journal.push(CdfUndo {
-                        key,
-                        previous: None,
-                    });
-                    entry.insert(AdaptiveCdfState::new(cdf))
-                }
-            }
-        } else {
-            self.cdfs
-                .entry(key)
-                .or_insert_with(|| AdaptiveCdfState::new(cdf))
-        };
+        let index = self.cdf_state_index(key, cdf);
+        let state = &mut self.cdf_states[index];
+        if let Some(epoch) = self.probe_epoch
+            && state.journal_epoch != epoch
+        {
+            self.cdf_journal.push(CdfUndo {
+                index,
+                previous: state.clone(),
+            });
+            state.journal_epoch = epoch;
+        }
         self.rate.encode_symbol(symbol, state.values());
         let mut count = state.count;
         if let Some(inner) = self.inner.as_mut() {
@@ -265,6 +262,40 @@ impl AdaptiveSymbolEncoder {
             adapt_cdf(state.values_mut(), symbol, &mut count);
         }
         state.count = count;
+    }
+
+    #[inline]
+    fn cdf_state_index(&mut self, key: usize, cdf: &[u16]) -> usize {
+        let slot = ((key >> 1) ^ (key >> 9)) & (CDF_CACHE_SIZE - 1);
+        let cached = self.cdf_cache[slot];
+        if cached.valid && cached.key == key {
+            return cached.index;
+        }
+        let index = match self.cdf_indices.get(&key) {
+            Some(&index) => index,
+            None => {
+                let index = self.cdf_states.len();
+                self.cdf_states.push(AdaptiveCdfState::new(cdf));
+                self.cdf_indices.insert(key, index);
+                index
+            }
+        };
+        self.cdf_cache[slot] = CdfCacheEntry {
+            valid: true,
+            key,
+            index,
+        };
+        index
+    }
+
+    fn rollback_cdfs(&mut self, journal_len: usize) {
+        while self.cdf_journal.len() > journal_len {
+            let undo = self
+                .cdf_journal
+                .pop()
+                .expect("CDF journal length must match its checkpoint");
+            self.cdf_states[undo.index] = undo.previous;
+        }
     }
 
     /// Encodes a symbol with a temporary CDF. AV1's edge-restricted
@@ -283,11 +314,8 @@ impl AdaptiveSymbolEncoder {
 
     fn current_cdf(&mut self, cdf: &'static [u16]) -> Vec<u16> {
         let key = cdf.as_ptr() as usize;
-        self.cdfs
-            .entry(key)
-            .or_insert_with(|| AdaptiveCdfState::new(cdf))
-            .values()
-            .to_vec()
+        let index = self.cdf_state_index(key, cdf);
+        self.cdf_states[index].values().to_vec()
     }
 
     fn encode_literal(&mut self, value: u32, bits: u32) {
@@ -2075,21 +2103,7 @@ impl<'a> FrameEncoder<'a> {
 
     fn end_probe(&mut self, checkpoint: ProbeCheckpoint) {
         let _timing = Guard::new(Kind::CdfRollback);
-        while self.sym.cdf_journal.len() > checkpoint.journal_len {
-            let undo = self
-                .sym
-                .cdf_journal
-                .pop()
-                .expect("CDF journal length must match its checkpoint");
-            match undo.previous {
-                Some(previous) => {
-                    self.sym.cdfs.insert(undo.key, previous);
-                }
-                None => {
-                    self.sym.cdfs.remove(&undo.key);
-                }
-            }
-        }
+        self.sym.rollback_cdfs(checkpoint.journal_len);
         self.sym.rate = checkpoint.rate;
         self.sym.inner = checkpoint.inner;
         self.sym.probe_epoch = checkpoint.previous_epoch;
@@ -4063,15 +4077,42 @@ mod tests {
     use crate::lossless_types::LosslessPlanes;
 
     #[test]
-    fn cdf_map_keeps_integer_context_keys_distinct() {
-        let mut map = CdfMap::default();
-        for key in [0, 1, usize::MAX / 2, usize::MAX] {
-            map.insert(key, AdaptiveCdfState::new(&[key as u16]));
+    fn cdf_index_map_keeps_integer_context_keys_distinct() {
+        let mut map = CdfIndexMap::default();
+        for (index, key) in [0, 1, usize::MAX / 2, usize::MAX].into_iter().enumerate() {
+            map.insert(key, index);
         }
         assert_eq!(map.len(), 4);
-        for key in [0, 1, usize::MAX / 2, usize::MAX] {
-            assert_eq!(map[&key].values(), &[key as u16]);
+        for (index, key) in [0, 1, usize::MAX / 2, usize::MAX].into_iter().enumerate() {
+            assert_eq!(map[&key], index);
         }
+    }
+
+    #[test]
+    fn dense_cdf_cache_preserves_probe_rollback_output() {
+        static CDF_A: [u16; 2] = [12_288, 32_768];
+        static CDF_B: [u16; 2] = [20_480, 32_768];
+
+        let mut baseline = AdaptiveSymbolEncoder::new();
+        baseline.encode_symbol(0, &CDF_A);
+        baseline.encode_symbol(1, &CDF_B);
+        let baseline = baseline.finish();
+
+        let mut probed = AdaptiveSymbolEncoder::new();
+        probed.encode_symbol(0, &CDF_A);
+        let saved_rate = probed.rate.clone();
+        let saved_inner = probed.inner.take();
+        let journal_len = probed.cdf_journal.len();
+        probed.probe_epoch = Some(1);
+        probed.encode_symbol(0, &CDF_B);
+        probed.encode_symbol(1, &CDF_A);
+        probed.rollback_cdfs(journal_len);
+        probed.rate = saved_rate;
+        probed.inner = saved_inner;
+        probed.probe_epoch = None;
+        probed.encode_symbol(1, &CDF_B);
+
+        assert_eq!(probed.finish(), baseline);
     }
 
     #[test]
