@@ -1,7 +1,7 @@
 //! Pure-Rust AV1 lossless still-image backend.
 
 use crate::lossless_headers as headers;
-use crate::lossless_tile::{FrameEncoder, needs_screen_content_tools};
+use crate::lossless_tile::{FrameEncoder, screen_content_tool_flags};
 use crate::lossless_types::LosslessPlanes;
 use gamut_core::{Error, Result};
 
@@ -57,7 +57,7 @@ pub(crate) fn encode_still_lossless(planes: &LosslessPlanes<'_>) -> Result<Encod
 
     let mi_cols = 2 * ((planes.width + 7) >> 3);
     let mi_rows = 2 * ((planes.height + 7) >> 3);
-    let screen_content_tools = planes.monochrome || needs_screen_content_tools(planes);
+    let (screen_content_tools, uv_palette_content) = screen_content_tool_flags(planes);
     let seq_payload = headers::sequence_header_payload(&config, planes.width, planes.height);
     let mut frame_payload = headers::frame_header_payload(
         planes.width,
@@ -67,7 +67,9 @@ pub(crate) fn encode_still_lossless(planes: &LosslessPlanes<'_>) -> Result<Encod
         planes.monochrome,
         screen_content_tools,
     );
-    frame_payload.extend_from_slice(&FrameEncoder::new(planes, screen_content_tools).encode());
+    frame_payload.extend_from_slice(
+        &FrameEncoder::new(planes, screen_content_tools, uv_palette_content).encode(),
+    );
 
     Ok(EncodedStill {
         obus: headers::assemble_temporal_unit(&seq_payload, &frame_payload),

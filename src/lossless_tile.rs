@@ -357,43 +357,46 @@ const AL_PART_CTX: [[[u8; 4]; 5]; 2] = [
 /// is `-1..=16` in both directions (§5.11.3).
 const BD_STRIDE: usize = 18;
 
-/// Returns whether a color frame contains a block that can use the narrow
-/// lossless palette path.  Screen-content syntax is enabled at frame scope,
-/// so avoid paying its per-block signaling cost when no such block exists.
-pub(crate) fn needs_screen_content_tools(planes: &LosslessPlanes<'_>) -> bool {
+/// Returns the frame-level screen-content flag and whether any block can use
+/// the UV palette path.  Both decisions inspect the same candidate blocks, so
+/// keep them together and avoid rescanning all UV samples during construction
+/// of the frame encoder.
+pub(crate) fn screen_content_tool_flags(planes: &LosslessPlanes<'_>) -> (bool, bool) {
     if planes.monochrome {
-        return true;
+        return (true, false);
     }
     if planes.subsampling_x != 0
         || planes.subsampling_y != 0
         || planes.width < 8
         || planes.height < 8
     {
-        return false;
+        return (false, false);
     }
     let width = planes.width as usize;
     let height = planes.height as usize;
+    let mut screen_content_tools = false;
+    let mut uv_palette_content = false;
     for &block_width in &[8usize, 16, 32, 64] {
         if block_width > width || block_width > height {
             continue;
         }
         for sy in (0..=height - block_width).step_by(block_width) {
             for sx in (0..=width - block_width).step_by(block_width) {
-                if color_palette_candidate(planes, sx, sy, block_width) {
-                    return true;
-                }
+                let (y_candidate, uv_candidate) = palette_candidates(planes, sx, sy, block_width);
+                screen_content_tools |= y_candidate || uv_candidate;
+                uv_palette_content |= uv_candidate;
             }
         }
     }
-    false
+    (screen_content_tools, uv_palette_content)
 }
 
-fn color_palette_candidate(
+fn palette_candidates(
     planes: &LosslessPlanes<'_>,
     sx: usize,
     sy: usize,
     block_width: usize,
-) -> bool {
+) -> (bool, bool) {
     let width = planes.width as usize;
     let y_candidate =
         palette_values_candidate(planes.planes[0], width, sx, sy, block_width, block_width);
@@ -409,7 +412,7 @@ fn color_palette_candidate(
             sy,
             block_width,
         );
-    y_candidate || uv_candidate
+    (y_candidate, uv_candidate)
 }
 
 fn palette_values_candidate(
@@ -459,40 +462,6 @@ fn palette_pairs_candidate(
         && pairs
             .iter()
             .all(|(u, _)| pairs.iter().filter(|(v, _)| v == u).count() == 1)
-}
-
-fn needs_uv_palette_tools(planes: &LosslessPlanes<'_>) -> bool {
-    if planes.monochrome
-        || planes.subsampling_x != 0
-        || planes.subsampling_y != 0
-        || planes.planes.len() < 3
-        || planes.width < 8
-        || planes.height < 8
-    {
-        return false;
-    }
-    let width = planes.width as usize;
-    let height = planes.height as usize;
-    for block_width in [8usize, 16, 32, 64] {
-        if block_width > width || block_width > height {
-            continue;
-        }
-        for sy in (0..=height - block_width).step_by(block_width) {
-            for sx in (0..=width - block_width).step_by(block_width) {
-                if palette_pairs_candidate(
-                    planes.planes[1],
-                    planes.planes[2],
-                    width,
-                    sx,
-                    sy,
-                    block_width,
-                ) {
-                    return true;
-                }
-            }
-        }
-    }
-    false
 }
 
 /// Encoder for the single tile that spans the whole frame.
@@ -606,7 +575,11 @@ struct LeafContextSnapshot {
 
 impl<'a> FrameEncoder<'a> {
     /// Creates an encoder over full-resolution planes (Y=G, U=B, V=R for identity CICP).
-    pub(crate) fn new(planes: &'a LosslessPlanes<'a>, screen_content_tools: bool) -> Self {
+    pub(crate) fn new(
+        planes: &'a LosslessPlanes<'a>,
+        screen_content_tools: bool,
+        uv_palette_content: bool,
+    ) -> Self {
         let width = planes.width as usize;
         let height = planes.height as usize;
         let mi_cols = 2 * ((width + 7) >> 3);
@@ -764,7 +737,7 @@ impl<'a> FrameEncoder<'a> {
             mi_palette_colors: vec![[0; 8]; mi_cols * mi_rows],
             mi_uv_palette_size: vec![0; mi_cols * mi_rows],
             mi_uv_palette_colors: vec![[0; 8]; mi_cols * mi_rows],
-            uv_palette_content: needs_uv_palette_tools(planes),
+            uv_palette_content,
             screen_content_tools,
         }
     }
@@ -3673,6 +3646,33 @@ mod tests {
     }
 
     #[test]
+    fn disabled_screen_content_tools_disable_uv_palette_content() {
+        let y = [0u16; 64];
+        let u = std::array::from_fn::<_, 64, _>(|index| (index & 1) as u16);
+        let v = std::array::from_fn::<_, 64, _>(|index| ((index & 1) + 2) as u16);
+        let planes = LosslessPlanes {
+            width: 8,
+            height: 8,
+            bit_depth: 8,
+            monochrome: false,
+            subsampling_x: 0,
+            subsampling_y: 0,
+            color_primaries: 1,
+            transfer_characteristics: 13,
+            matrix_coefficients: 0,
+            full_range: true,
+            planes: vec![&y, &u, &v],
+        };
+
+        let (screen_content_tools, uv_palette_content) = screen_content_tool_flags(&planes);
+        assert!(screen_content_tools);
+        assert!(uv_palette_content);
+        let encoder = FrameEncoder::new(&planes, false, false);
+        assert!(!encoder.uv_palette_content);
+        assert!(encoder.palette_block(0, 0, 8).is_none());
+    }
+
+    #[test]
     fn adaptive_cdf_state_clones_without_changing_values_or_count() {
         let mut state = AdaptiveCdfState::new(&[8192, 16_384, 24_576, 32_768]);
         let mut count = state.count;
@@ -3710,7 +3710,7 @@ mod tests {
             full_range: true,
             planes: vec![&samples],
         };
-        let encoder = FrameEncoder::new(&planes, true);
+        let encoder = FrameEncoder::new(&planes, true, false);
 
         let predicted =
             [-512, -257, -4, 0, 4, 255, 512].map(|delta| encoder.predict_cfl_sample(128, 8, delta));
@@ -3738,7 +3738,7 @@ mod tests {
             full_range: true,
             planes: vec![&samples],
         };
-        let encoder = FrameEncoder::new(&planes, true);
+        let encoder = FrameEncoder::new(&planes, true, false);
         let predicted = encoder.predict_block_4x4(0, 4, 4, SMOOTH_H_PRED, 0)[0];
         assert_eq!(predicted, 10);
     }
@@ -3762,7 +3762,7 @@ mod tests {
             full_range: true,
             planes: vec![&samples],
         };
-        let encoder = FrameEncoder::new(&planes, true);
+        let encoder = FrameEncoder::new(&planes, true, false);
         let predicted = encoder.predict_block_4x4(0, 4, 4, SMOOTH_PRED, 0)[0];
         assert_eq!(predicted, 55);
     }
@@ -3788,7 +3788,7 @@ mod tests {
             full_range: true,
             planes: vec![&samples],
         };
-        let encoder = FrameEncoder::new(&planes, true);
+        let encoder = FrameEncoder::new(&planes, true, false);
         for (mode, angle, expected) in [
             (
                 D45_PRED,
