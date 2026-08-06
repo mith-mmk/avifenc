@@ -820,11 +820,24 @@ impl<'a> FrameEncoder<'a> {
     }
 
     fn reconstruct_source_block(&mut self, plane: usize, sx: usize, sy: usize) {
-        let width = self.plane_coded_widths[plane];
-        let height = self.plane_coded_heights[plane];
-        for y in sy..(sy + 4).min(height) {
-            for x in sx..(sx + 4).min(width) {
-                self.reconstructed[plane][y * width + x] = self.sample(plane, x, y) as u16;
+        let coded_width = self.plane_coded_widths[plane];
+        let coded_height = self.plane_coded_heights[plane];
+        let source_width = self.plane_widths[plane];
+        let source_height = self.plane_heights[plane];
+        if sx + 4 <= source_width && sy + 4 <= source_height {
+            let source = self.planes[plane];
+            let reconstructed = &mut self.reconstructed[plane];
+            for row in 0..4 {
+                let source_start = (sy + row) * source_width + sx;
+                let reconstructed_start = (sy + row) * coded_width + sx;
+                reconstructed[reconstructed_start..reconstructed_start + 4]
+                    .copy_from_slice(&source[source_start..source_start + 4]);
+            }
+            return;
+        }
+        for y in sy..(sy + 4).min(coded_height) {
+            for x in sx..(sx + 4).min(coded_width) {
+                self.reconstructed[plane][y * coded_width + x] = self.sample(plane, x, y) as u16;
             }
         }
     }
@@ -2871,15 +2884,33 @@ impl<'a> FrameEncoder<'a> {
         let predictions = cfl_alpha_q3
             .is_none()
             .then(|| self.predict_block_4x4(plane, sx, sy, mode, angle_delta));
-        for i in 0..4 {
-            for j in 0..4 {
-                let sample = self.sample(plane, sx + j, sy + i);
-                let prediction = if let Some((alpha_q3, luma_deltas, base)) = &cfl_prediction {
-                    self.predict_cfl_sample(*base, *alpha_q3, luma_deltas[i * 4 + j])
-                } else {
-                    predictions.as_ref().expect("intra predictions")[i * 4 + j]
-                };
-                res[i * 4 + j] = sample - prediction;
+        let source_width = self.plane_widths[plane];
+        let source_height = self.plane_heights[plane];
+        if sx + 4 <= source_width && sy + 4 <= source_height {
+            let source = self.planes[plane];
+            for i in 0..4 {
+                let source_start = (sy + i) * source_width + sx;
+                for j in 0..4 {
+                    let sample = i32::from(source[source_start + j]);
+                    let prediction = if let Some((alpha_q3, luma_deltas, base)) = &cfl_prediction {
+                        self.predict_cfl_sample(*base, *alpha_q3, luma_deltas[i * 4 + j])
+                    } else {
+                        predictions.as_ref().expect("intra predictions")[i * 4 + j]
+                    };
+                    res[i * 4 + j] = sample - prediction;
+                }
+            }
+        } else {
+            for i in 0..4 {
+                for j in 0..4 {
+                    let sample = self.sample(plane, sx + j, sy + i);
+                    let prediction = if let Some((alpha_q3, luma_deltas, base)) = &cfl_prediction {
+                        self.predict_cfl_sample(*base, *alpha_q3, luma_deltas[i * 4 + j])
+                    } else {
+                        predictions.as_ref().expect("intra predictions")[i * 4 + j]
+                    };
+                    res[i * 4 + j] = sample - prediction;
+                }
             }
         }
         let quant = gamut_dsp::fwht4x4(&res);
@@ -3053,9 +3084,21 @@ impl<'a> FrameEncoder<'a> {
         let mut reference = [0; 2 * N + 1];
         if block_sy > 0 {
             let available = if have_above_right { 2 * N } else { N };
-            for (x, sample) in reference.iter_mut().enumerate() {
-                *sample =
-                    self.reconstructed_sample(plane, block_sx + x.min(available - 1), block_sy - 1);
+            let width = self.plane_coded_widths[plane];
+            if block_sx + available <= width {
+                let row_start = (block_sy - 1) * width + block_sx;
+                let row = &self.reconstructed[plane][row_start..row_start + available];
+                for (x, sample) in reference.iter_mut().enumerate() {
+                    *sample = i32::from(row[x.min(available - 1)]);
+                }
+            } else {
+                for (x, sample) in reference.iter_mut().enumerate() {
+                    *sample = self.reconstructed_sample(
+                        plane,
+                        block_sx + x.min(available - 1),
+                        block_sy - 1,
+                    );
+                }
             }
         } else if block_sx > 0 {
             reference.fill(self.reconstructed_sample(plane, block_sx - 1, block_sy));
@@ -3080,9 +3123,24 @@ impl<'a> FrameEncoder<'a> {
         let mut reference = [0; 2 * N + 1];
         if block_sx > 0 {
             let available = if have_below_left { 2 * N } else { N };
-            for (y, sample) in reference.iter_mut().enumerate() {
-                *sample =
-                    self.reconstructed_sample(plane, block_sx - 1, block_sy + y.min(available - 1));
+            let width = self.plane_coded_widths[plane];
+            let height = self.plane_coded_heights[plane];
+            if block_sy + available <= height {
+                let column = block_sx - 1;
+                for (y, sample) in reference.iter_mut().enumerate() {
+                    *sample = i32::from(
+                        self.reconstructed[plane]
+                            [(block_sy + y.min(available - 1)) * width + column],
+                    );
+                }
+            } else {
+                for (y, sample) in reference.iter_mut().enumerate() {
+                    *sample = self.reconstructed_sample(
+                        plane,
+                        block_sx - 1,
+                        block_sy + y.min(available - 1),
+                    );
+                }
             }
         } else if block_sy > 0 {
             reference.fill(self.reconstructed_sample(plane, block_sx, block_sy - 1));
