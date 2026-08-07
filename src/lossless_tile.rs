@@ -1419,7 +1419,7 @@ impl<'a> FrameEncoder<'a> {
             if self.monochrome {
                 DC_PRED
             } else {
-                self.select_uv_mode_for_y_shape(r, c, bw, bh, normal_y_mode)
+                self.select_uv_mode_for_y_shape(r, c, bw, bh, normal_y_mode, None)
                     .mode
             }
         });
@@ -2435,7 +2435,7 @@ impl<'a> FrameEncoder<'a> {
                 rate: None,
             }
         } else {
-            self.select_uv_mode_for_y_shape(r, c, bw, bw, DC_PRED)
+            self.select_uv_mode_for_y_shape(r, c, bw, bw, DC_PRED, None)
         };
         let mut best_uv_mode = initial_uv_selection.mode;
         let mut best_size = initial_uv_selection.rate.unwrap_or_else(|| {
@@ -2448,7 +2448,7 @@ impl<'a> FrameEncoder<'a> {
                     rate: None,
                 }
             } else {
-                self.select_uv_mode_for_y_shape(r, c, bw, bw, mode)
+                self.select_uv_mode_for_y_shape(r, c, bw, bw, mode, Some(best_size))
             };
             let uv_mode = uv_selection.mode;
             let size = uv_selection.rate.unwrap_or_else(|| {
@@ -2478,7 +2478,8 @@ impl<'a> FrameEncoder<'a> {
     }
 
     fn select_uv_mode_for_y(&mut self, r: usize, c: usize, bw: usize, y_mode: u8) -> u8 {
-        self.select_uv_mode_for_y_shape(r, c, bw, bw, y_mode).mode
+        self.select_uv_mode_for_y_shape(r, c, bw, bw, y_mode, None)
+            .mode
     }
 
     fn select_uv_mode_candidates(
@@ -2488,10 +2489,13 @@ impl<'a> FrameEncoder<'a> {
         bw: usize,
         y_mode: u8,
         candidates: &[u8],
+        limit: Option<usize>,
     ) -> UvModeSelection {
         let mut best_mode = candidates.first().copied().unwrap_or(DC_PRED);
-        let mut best_size = self.measure_block_modes_local(r, c, bw, y_mode, best_mode, None);
+        let mut best_size = self
+            .measure_block_modes_local_with_limit(r, c, bw, y_mode, best_mode, None, 0, 0, limit);
         for &mode in candidates.iter().skip(1) {
+            let candidate_limit = Some(limit.map_or(best_size, |value| value.min(best_size)));
             let size = self.measure_block_modes_local_with_limit(
                 r,
                 c,
@@ -2501,7 +2505,7 @@ impl<'a> FrameEncoder<'a> {
                 None,
                 0,
                 0,
-                Some(best_size),
+                candidate_limit,
             );
             if size < best_size {
                 best_mode = mode;
@@ -2521,6 +2525,7 @@ impl<'a> FrameEncoder<'a> {
         bw: usize,
         bh: usize,
         y_mode: u8,
+        limit: Option<usize>,
     ) -> UvModeSelection {
         if bw != bh {
             return UvModeSelection {
@@ -2583,7 +2588,7 @@ impl<'a> FrameEncoder<'a> {
                 SMOOTH_H_PRED,
                 PAETH_PRED,
             ];
-            return self.select_uv_mode_candidates(r, c, bw, y_mode, &candidates);
+            return self.select_uv_mode_candidates(r, c, bw, y_mode, &candidates, limit);
         }
         if r.is_multiple_of(16) || c.is_multiple_of(16) {
             let candidates = [
@@ -2595,7 +2600,7 @@ impl<'a> FrameEncoder<'a> {
                 SMOOTH_H_PRED,
                 PAETH_PRED,
             ];
-            return self.select_uv_mode_candidates(r, c, bw, y_mode, &candidates);
+            return self.select_uv_mode_candidates(r, c, bw, y_mode, &candidates, limit);
         }
         let candidates = if bw < 16 {
             vec![
@@ -2627,7 +2632,7 @@ impl<'a> FrameEncoder<'a> {
                 SMOOTH_H_PRED,
             ]
         };
-        self.select_uv_mode_candidates(r, c, bw, y_mode, &candidates)
+        self.select_uv_mode_candidates(r, c, bw, y_mode, &candidates, limit)
     }
 
     fn select_angle_deltas(
