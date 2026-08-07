@@ -1836,9 +1836,8 @@ impl<'a> FrameEncoder<'a> {
         // edge extension advances after every 4x4 transform, including the
         // transforms earlier in this same block; checking the whole block
         // against the caller's map would therefore accept unsafe non-DC skip.
-        let snapshot = self.snapshot_reconstruction_context(r, c, bw, bh);
-        let mut skippable = true;
-        'planes: for plane in 0..self.planes.len() {
+        let mut snapshot = None;
+        for plane in 0..self.planes.len() {
             let shift_x = if plane == 0 { 0 } else { self.subsampling_x };
             let shift_y = if plane == 0 { 0 } else { self.subsampling_y };
             let sx = (c * 4) >> shift_x;
@@ -1860,21 +1859,27 @@ impl<'a> FrameEncoder<'a> {
                         if plane == 0 { y_mode } else { uv_mode },
                         0,
                     );
-                    for y in 0..4 {
-                        for x in 0..4 {
-                            if self.sample(plane, px + x, py + y) != predictions[y * 4 + x] {
-                                skippable = false;
-                                break 'planes;
-                            }
+                    let matches = (0..4).all(|y| {
+                        (0..4).all(|x| self.sample(plane, px + x, py + y) == predictions[y * 4 + x])
+                    });
+                    if !matches {
+                        if let Some(snapshot) = snapshot.take() {
+                            self.restore_reconstruction_context(snapshot);
                         }
+                        return false;
+                    }
+                    if snapshot.is_none() {
+                        snapshot = Some(self.snapshot_reconstruction_context(r, c, bw, bh));
                     }
                     self.reconstruct_source_block(plane, px, py);
                     self.mark_block_decoded_cell(plane, py >> 2, px >> 2);
                 }
             }
         }
-        self.restore_reconstruction_context(snapshot);
-        skippable
+        if let Some(snapshot) = snapshot {
+            self.restore_reconstruction_context(snapshot);
+        }
+        true
     }
 
     fn exact_skip_mode(&mut self, r: usize, c: usize, bw: usize) -> Option<u8> {
