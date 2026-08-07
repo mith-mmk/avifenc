@@ -145,6 +145,7 @@ impl RateEstimator {
         }
     }
 
+    #[inline(always)]
     fn encode_symbol(&mut self, symbol: usize, cdf: &[u16]) {
         let nsyms = cdf.len() as u32;
         let fl = if symbol > 0 {
@@ -163,12 +164,14 @@ impl RateEstimator {
         self.normalize(range);
     }
 
+    #[inline(always)]
     fn encode_literal(&mut self, value: u32, bits: u32) {
         for bit in (0..bits).rev() {
             self.encode_bool(((value >> bit) & 1) != 0);
         }
     }
 
+    #[inline(always)]
     fn encode_q15(&mut self, fl: u32, fh: u32, symbol: u32, nsyms: u32) {
         let mut range = self.rng;
         let n = nsyms - 1;
@@ -187,6 +190,7 @@ impl RateEstimator {
         self.normalize(range);
     }
 
+    #[inline(always)]
     fn normalize(&mut self, range: u32) {
         let shift = range.leading_zeros() - 16;
         let mut cnt = self.cnt;
