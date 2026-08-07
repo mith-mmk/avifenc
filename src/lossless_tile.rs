@@ -955,27 +955,11 @@ impl<'a> FrameEncoder<'a> {
         i32::from(self.reconstructed[plane][y.min(height - 1) * width + x.min(width - 1)])
     }
 
-    fn reconstruct_source_block(&mut self, plane: usize, sx: usize, sy: usize) {
-        let coded_width = self.plane_coded_widths[plane];
-        let coded_height = self.plane_coded_heights[plane];
-        let source_width = self.plane_widths[plane];
-        let source_height = self.plane_heights[plane];
-        if sx + 4 <= source_width && sy + 4 <= source_height {
-            let source = self.planes[plane];
-            let reconstructed = &mut self.reconstructed[plane];
-            for row in 0..4 {
-                let source_start = (sy + row) * source_width + sx;
-                let reconstructed_start = (sy + row) * coded_width + sx;
-                reconstructed[reconstructed_start..reconstructed_start + 4]
-                    .copy_from_slice(&source[source_start..source_start + 4]);
-            }
-            return;
-        }
-        for y in sy..(sy + 4).min(coded_height) {
-            for x in sx..(sx + 4).min(coded_width) {
-                self.reconstructed[plane][y * coded_width + x] = self.sample(plane, x, y) as u16;
-            }
-        }
+    #[inline(always)]
+    fn reconstruct_source_block(&mut self, _plane: usize, _sx: usize, _sy: usize) {
+        // `reconstructed` is initialized with the edge-replicated source and
+        // lossless reconstruction always produces the same source samples.
+        // Only `block_decoded` changes as blocks become available.
     }
 
     fn encode_partition_depth(&mut self, r: usize, c: usize, bw: usize, rdo_depth: u8) {
