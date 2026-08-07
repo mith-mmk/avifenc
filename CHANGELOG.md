@@ -1,6 +1,6 @@
 # Changelog
 
-## 0.1.0 - Unreleased
+## 0.1.0 - 2026-08-07
 
 - Added a Pure Rust AVIF still-image encoder backed by `rav1e`.
 - Added compatible RGBA, native-plane, metadata, and callback APIs.
@@ -20,3 +20,8 @@
 - Added the opt-in `multithread` feature. It enables rav1e's native threading
   backend and parallelizes the independent base and complete keyframe
   searches while keeping default/WASM builds single-threaded.
+- Added lossless `EncoderOptions::speed` presets from 7 through 10. They reduce
+  the lossless RDO search while preserving pixel-exact output; the default
+  speed-6 search and its encoded bytes remain unchanged.
+- Verified the crate with FFmpeg, the existing `avif-rust` decoder, Wasm checks,
+  Clippy, and the `wml2` AVIF integration tests.
