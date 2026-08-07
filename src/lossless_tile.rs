@@ -677,11 +677,10 @@ struct PlaneBlockContextSnapshot {
     reconstruction: PlaneReconstructionSnapshot,
 }
 
+// Lossless reconstruction always copies the source sample back into this
+// buffer. Probes therefore need to roll back only availability metadata; the
+// reconstructed sample values are invariant and do not need a pixel snapshot.
 struct PlaneReconstructionSnapshot {
-    x: usize,
-    y: usize,
-    width: usize,
-    samples: Vec<u16>,
     block_decoded_x4: usize,
     block_decoded_y4: usize,
     block_decoded_width4: usize,
@@ -693,8 +692,6 @@ struct PlaneReconstructionSnapshot {
 struct PlaneBlockRegion {
     x: usize,
     y: usize,
-    width: usize,
-    height: usize,
     width4: usize,
     height4: usize,
 }
@@ -709,9 +706,6 @@ struct LeafPlaneSnapshot {
     left_dc: u8,
     block_decoded_index: usize,
     block_decoded: u8,
-    reconstructed_x: usize,
-    reconstructed_y: usize,
-    reconstructed: [u16; 16],
 }
 
 #[derive(Clone)]
@@ -2015,8 +2009,6 @@ impl<'a> FrameEncoder<'a> {
         PlaneBlockRegion {
             x,
             y,
-            width,
-            height,
             width4: width.div_ceil(4),
             height4: height.div_ceil(4),
         }
@@ -2033,13 +2025,6 @@ impl<'a> FrameEncoder<'a> {
         (0..self.planes.len())
             .map(|plane| {
                 let region = self.plane_block_region(plane, r, c, bw, bh);
-                let coded_width = self.plane_coded_widths[plane];
-                let mut samples = Vec::with_capacity(region.width * region.height);
-                for y in region.y..region.y + region.height {
-                    let start = y * coded_width + region.x;
-                    samples
-                        .extend_from_slice(&self.reconstructed[plane][start..start + region.width]);
-                }
                 let block_decoded_x4 = region.x >> 2;
                 let block_decoded_y4 = region.y >> 2;
                 let mut block_decoded = [0; BLOCK_DECODED_SNAPSHOT_WORDS];
@@ -2059,10 +2044,6 @@ impl<'a> FrameEncoder<'a> {
                     }
                 }
                 PlaneReconstructionSnapshot {
-                    x: region.x,
-                    y: region.y,
-                    width: region.width,
-                    samples,
                     block_decoded_x4,
                     block_decoded_y4,
                     block_decoded_width4: region.width4,
@@ -2099,13 +2080,6 @@ impl<'a> FrameEncoder<'a> {
                         >> (bit % u64::BITS as usize))
                         & 1) as u8;
                 }
-            }
-        }
-        let coded_width = self.plane_coded_widths[plane];
-        if snapshot.width > 0 {
-            for (row, samples) in snapshot.samples.chunks(snapshot.width).enumerate() {
-                let start = (snapshot.y + row) * coded_width + snapshot.x;
-                self.reconstructed[plane][start..start + snapshot.width].copy_from_slice(samples);
             }
         }
     }
@@ -2278,17 +2252,6 @@ impl<'a> FrameEncoder<'a> {
                 let by = cell_r as isize - self.sb_r as isize;
                 let bx = cell_c as isize - self.sb_c as isize;
                 let block_decoded_index = (by + 1) as usize * BD_STRIDE + (bx + 1) as usize;
-                let mut reconstructed = [0; 16];
-                let width = self.plane_coded_widths[plane];
-                let height = self.plane_coded_heights[plane];
-                for y in 0..4 {
-                    for x in 0..4 {
-                        if sx + x < width && sy + y < height {
-                            reconstructed[y * 4 + x] =
-                                self.reconstructed[plane][(sy + y) * width + sx + x];
-                        }
-                    }
-                }
                 LeafPlaneSnapshot {
                     above_index,
                     above_level: self.above_level[plane][above_index],
@@ -2298,9 +2261,6 @@ impl<'a> FrameEncoder<'a> {
                     left_dc: self.left_dc[plane][left_index],
                     block_decoded_index,
                     block_decoded: self.block_decoded[plane][block_decoded_index],
-                    reconstructed_x: sx,
-                    reconstructed_y: sy,
-                    reconstructed,
                 }
             })
             .collect();
@@ -2329,17 +2289,6 @@ impl<'a> FrameEncoder<'a> {
             self.left_level[plane][saved.left_index] = saved.left_level;
             self.left_dc[plane][saved.left_index] = saved.left_dc;
             self.block_decoded[plane][saved.block_decoded_index] = saved.block_decoded;
-            let width = self.plane_coded_widths[plane];
-            let height = self.plane_coded_heights[plane];
-            for y in 0..4 {
-                for x in 0..4 {
-                    if saved.reconstructed_x + x < width && saved.reconstructed_y + y < height {
-                        self.reconstructed[plane]
-                            [(saved.reconstructed_y + y) * width + saved.reconstructed_x + x] =
-                            saved.reconstructed[y * 4 + x];
-                    }
-                }
-            }
         }
         if let Some((index, bsl, skip, ymode, palette_size, colors, uv_palette_size, uv_colors)) =
             snapshot.mi
