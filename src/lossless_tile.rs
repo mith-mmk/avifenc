@@ -2915,7 +2915,11 @@ impl<'a> FrameEncoder<'a> {
     ) -> UvModeSelection {
         let previous_cache = self.luma_quant_cache.take();
         let luma_cache = self.build_luma_quant_cache(r, c, bw, bw, y_mode, 0);
-        let luma_trace = self.build_luma_entropy_trace(&luma_cache);
+        // The trace has a fixed allocation/build cost. Restrict it to the
+        // full candidate sets where several UV probes amortize that cost;
+        // reduced edge candidate sets retain the original cached path.
+        let luma_trace =
+            (candidates.len() >= 11).then(|| self.build_luma_entropy_trace(&luma_cache));
         self.luma_quant_cache = Some(luma_cache);
         let mut best_mode = candidates.first().copied().unwrap_or(DC_PRED);
         let mut best_size = self.measure_block_modes_local_with_limit_and_luma_trace(
@@ -2928,7 +2932,7 @@ impl<'a> FrameEncoder<'a> {
             0,
             0,
             limit,
-            Some(&luma_trace),
+            luma_trace.as_ref(),
         );
         for &mode in candidates.iter().skip(1) {
             let candidate_limit = Some(limit.map_or(best_size, |value| value.min(best_size)));
@@ -2942,7 +2946,7 @@ impl<'a> FrameEncoder<'a> {
                 0,
                 0,
                 candidate_limit,
-                Some(&luma_trace),
+                luma_trace.as_ref(),
             );
             if size < best_size {
                 best_mode = mode;
