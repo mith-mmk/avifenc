@@ -42,6 +42,7 @@ impl Hasher for CdfKeyHasher {
 }
 
 const MAX_ADAPTIVE_CDF_LEN: usize = 16;
+const MAX_LUMA_TRACE_CDF_LEN: usize = 5;
 const CDF_CACHE_SIZE: usize = 512;
 const MAX_BLOCK_DECODED_CELLS: usize = 16 * 16;
 const BLOCK_DECODED_SNAPSHOT_WORDS: usize = MAX_BLOCK_DECODED_CELLS / u64::BITS as usize;
@@ -147,6 +148,11 @@ impl AdaptiveCdfState {
         if self.count < 32 {
             self.count += 1;
         }
+    }
+
+    #[inline]
+    fn has_same_probabilities(&self, other: &Self) -> bool {
+        self.count == other.count && self.values() == other.values()
     }
 }
 
@@ -814,6 +820,179 @@ struct LumaQuantCache {
     y_mode: u8,
     angle_delta: i8,
     blocks: Vec<QuantizedBlock>,
+}
+
+#[derive(Clone, Copy)]
+enum LumaRateOp {
+    Symbol {
+        symbol: u8,
+        len: u8,
+        cdf: [u16; MAX_LUMA_TRACE_CDF_LEN],
+    },
+    Literal {
+        value: u32,
+        bits: u8,
+    },
+}
+
+impl LumaRateOp {
+    #[inline(always)]
+    fn replay(self, rate: &mut RateEstimator) {
+        match self {
+            Self::Symbol { symbol, len, cdf } => {
+                rate.encode_symbol(usize::from(symbol), &cdf[..usize::from(len)]);
+            }
+            Self::Literal { value, bits } => rate.encode_literal(value, u32::from(bits)),
+        }
+    }
+}
+
+struct LumaEntropyBlockTrace {
+    x4: usize,
+    y4: usize,
+    start: usize,
+    base_end: usize,
+    end: usize,
+    check_after_base: bool,
+    cul: u8,
+    dc_category: u8,
+}
+
+struct LumaCdfTrace {
+    index: usize,
+    initial: AdaptiveCdfState,
+    final_state: AdaptiveCdfState,
+}
+
+struct LumaEntropyTrace {
+    r: usize,
+    c: usize,
+    bw: usize,
+    bh: usize,
+    y_mode: u8,
+    angle_delta: i8,
+    ops: Vec<LumaRateOp>,
+    blocks: Vec<LumaEntropyBlockTrace>,
+    cdfs: Vec<LumaCdfTrace>,
+}
+
+impl LumaEntropyTrace {
+    fn matches_block(
+        &self,
+        r: usize,
+        c: usize,
+        bw: usize,
+        bh: usize,
+        y_mode: u8,
+        angle_delta: i8,
+    ) -> bool {
+        self.r == r
+            && self.c == c
+            && self.bw == bw
+            && self.bh == bh
+            && self.y_mode == y_mode
+            && self.angle_delta == angle_delta
+    }
+
+    fn starts_from(&self, sym: &AdaptiveSymbolEncoder) -> bool {
+        self.cdfs.iter().all(|traced| {
+            sym.cdf_states
+                .get(traced.index)
+                .is_some_and(|state| state.has_same_probabilities(&traced.initial))
+        })
+    }
+
+    fn install_final_cdfs(&self, sym: &mut AdaptiveSymbolEncoder) {
+        let epoch = sym
+            .probe_epoch
+            .expect("luma entropy traces are installed only during an RDO probe");
+        for traced in &self.cdfs {
+            let state = &mut sym.cdf_states[traced.index];
+            if state.journal_epoch != epoch {
+                sym.cdf_journal.push(CdfUndo {
+                    index: traced.index,
+                    previous: state.clone(),
+                });
+            }
+            let mut final_state = traced.final_state.clone();
+            final_state.journal_epoch = epoch;
+            *state = final_state;
+        }
+    }
+}
+
+struct LumaEntropyTraceBuilder {
+    ops: Vec<LumaRateOp>,
+    cdfs: Vec<LumaCdfTrace>,
+    cdf_slots: Vec<usize>,
+}
+
+impl LumaEntropyTraceBuilder {
+    fn new(cdf_capacity: usize) -> Self {
+        Self {
+            ops: Vec::new(),
+            cdfs: Vec::new(),
+            cdf_slots: vec![usize::MAX; cdf_capacity],
+        }
+    }
+
+    fn encode_symbol(
+        &mut self,
+        sym: &mut AdaptiveSymbolEncoder,
+        symbol: usize,
+        cdf: &'static [u16],
+    ) {
+        assert!(
+            cdf.len() <= MAX_LUMA_TRACE_CDF_LEN,
+            "lossless coefficient CDF exceeds the compact trace representation"
+        );
+        let index = sym.cdf_state_index(cdf.as_ptr() as usize, cdf);
+        if self.cdf_slots.len() <= index {
+            self.cdf_slots.resize(index + 1, usize::MAX);
+        }
+        let slot = if self.cdf_slots[index] == usize::MAX {
+            let slot = self.cdfs.len();
+            let initial = sym.cdf_states[index].clone();
+            self.cdfs.push(LumaCdfTrace {
+                index,
+                initial: initial.clone(),
+                final_state: initial,
+            });
+            self.cdf_slots[index] = slot;
+            slot
+        } else {
+            self.cdf_slots[index]
+        };
+        let state = &mut self.cdfs[slot].final_state;
+        let mut values = [0; MAX_LUMA_TRACE_CDF_LEN];
+        values[..state.values().len()].copy_from_slice(state.values());
+        self.ops.push(LumaRateOp::Symbol {
+            symbol: symbol as u8,
+            len: state.values().len() as u8,
+            cdf: values,
+        });
+        state.adapt(symbol);
+    }
+
+    fn encode_literal(&mut self, value: u32, bits: u32) {
+        self.ops.push(LumaRateOp::Literal {
+            value,
+            bits: bits as u8,
+        });
+    }
+
+    fn encode_golomb(&mut self, x: u32) {
+        let len = 32 - x.leading_zeros();
+        for _ in 0..(len - 1) {
+            self.encode_literal(0, 1);
+        }
+        self.encode_literal(1, 1);
+        let mut i = len as isize - 2;
+        while i >= 0 {
+            self.encode_literal((x >> i) & 1, 1);
+            i -= 1;
+        }
+    }
 }
 
 #[derive(Default)]
@@ -1729,6 +1908,36 @@ impl<'a> FrameEncoder<'a> {
         uv_angle_delta: i8,
         cfl: Option<(i8, i8)>,
     ) {
+        self.encode_block_with_mode_shape_cfl_and_luma_trace(
+            r,
+            c,
+            bw,
+            bh,
+            palette,
+            y_mode,
+            uv_mode,
+            y_angle_delta,
+            uv_angle_delta,
+            cfl,
+            None,
+        );
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn encode_block_with_mode_shape_cfl_and_luma_trace(
+        &mut self,
+        r: usize,
+        c: usize,
+        bw: usize,
+        bh: usize,
+        palette: Option<PaletteBlock>,
+        y_mode: u8,
+        uv_mode: u8,
+        y_angle_delta: i8,
+        uv_angle_delta: i8,
+        cfl: Option<(i8, i8)>,
+        luma_trace: Option<&LumaEntropyTrace>,
+    ) {
         let _timing = Guard::new(Kind::BlockEncode);
         if self.probe_rate_limit_reached() {
             return;
@@ -1889,6 +2098,10 @@ impl<'a> FrameEncoder<'a> {
         // residual(): decoder order is luma, then U/V only for chroma-reference blocks.
         if has_luma_palette {
             self.encode_palette_plane_unit(0, r, c, bw, bh);
+        } else if let Some(trace) = luma_trace.filter(|trace| {
+            trace.matches_block(r, c, bw, bh, y_mode, y_angle_delta) && trace.starts_from(&self.sym)
+        }) {
+            self.replay_luma_entropy_trace(trace);
         } else if self.luma_quant_cache.is_some() {
             let cached_luma = self
                 .luma_quant_cache
@@ -2306,6 +2519,34 @@ impl<'a> FrameEncoder<'a> {
         uv_angle_delta: i8,
         limit: Option<usize>,
     ) -> usize {
+        self.measure_block_modes_local_with_limit_and_luma_trace(
+            r,
+            c,
+            bw,
+            y_mode,
+            uv_mode,
+            palette,
+            y_angle_delta,
+            uv_angle_delta,
+            limit,
+            None,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn measure_block_modes_local_with_limit_and_luma_trace(
+        &mut self,
+        r: usize,
+        c: usize,
+        bw: usize,
+        y_mode: u8,
+        uv_mode: u8,
+        palette: Option<PaletteBlock>,
+        y_angle_delta: i8,
+        uv_angle_delta: i8,
+        limit: Option<usize>,
+        luma_trace: Option<&LumaEntropyTrace>,
+    ) -> usize {
         if bw == 4 {
             return self
                 .measure_leaf_block_modes_local_with_limit(r, c, y_mode, uv_mode, palette, limit);
@@ -2320,7 +2561,7 @@ impl<'a> FrameEncoder<'a> {
         self.probe_rate_limit = limit
             .map(|value| saved_rate_q10.saturating_add(u64::try_from(value).unwrap_or(u64::MAX)));
         self.probe_rate_limited = false;
-        self.encode_block_with_mode_shape_cfl(
+        self.encode_block_with_mode_shape_cfl_and_luma_trace(
             r,
             c,
             bw,
@@ -2331,6 +2572,7 @@ impl<'a> FrameEncoder<'a> {
             y_angle_delta,
             uv_angle_delta,
             None,
+            luma_trace,
         );
         let size = if self.probe_rate_limited {
             limit.unwrap_or(usize::MAX)
@@ -2672,13 +2914,25 @@ impl<'a> FrameEncoder<'a> {
         limit: Option<usize>,
     ) -> UvModeSelection {
         let previous_cache = self.luma_quant_cache.take();
-        self.luma_quant_cache = Some(self.build_luma_quant_cache(r, c, bw, bw, y_mode, 0));
+        let luma_cache = self.build_luma_quant_cache(r, c, bw, bw, y_mode, 0);
+        let luma_trace = self.build_luma_entropy_trace(&luma_cache);
+        self.luma_quant_cache = Some(luma_cache);
         let mut best_mode = candidates.first().copied().unwrap_or(DC_PRED);
-        let mut best_size = self
-            .measure_block_modes_local_with_limit(r, c, bw, y_mode, best_mode, None, 0, 0, limit);
+        let mut best_size = self.measure_block_modes_local_with_limit_and_luma_trace(
+            r,
+            c,
+            bw,
+            y_mode,
+            best_mode,
+            None,
+            0,
+            0,
+            limit,
+            Some(&luma_trace),
+        );
         for &mode in candidates.iter().skip(1) {
             let candidate_limit = Some(limit.map_or(best_size, |value| value.min(best_size)));
-            let size = self.measure_block_modes_local_with_limit(
+            let size = self.measure_block_modes_local_with_limit_and_luma_trace(
                 r,
                 c,
                 bw,
@@ -2688,6 +2942,7 @@ impl<'a> FrameEncoder<'a> {
                 0,
                 0,
                 candidate_limit,
+                Some(&luma_trace),
             );
             if size < best_size {
                 best_mode = mode;
@@ -3520,6 +3775,166 @@ impl<'a> FrameEncoder<'a> {
                 self.mark_block_decoded_cell(plane, py >> 2, px >> 2);
             }
         }
+    }
+
+    fn build_luma_entropy_trace(&mut self, cache: &LumaQuantCache) -> LumaEntropyTrace {
+        let x4_start = cache.c;
+        let y4_start = cache.r;
+        let width4 = cache.bw.div_ceil(4);
+        let height4 = cache.bh.div_ceil(4);
+        let above_end = (x4_start + width4).min(self.above_level[0].len());
+        let left_end = (y4_start + height4).min(self.left_level[0].len());
+        let saved_above_level = self.above_level[0][x4_start..above_end].to_vec();
+        let saved_above_dc = self.above_dc[0][x4_start..above_end].to_vec();
+        let saved_left_level = self.left_level[0][y4_start..left_end].to_vec();
+        let saved_left_dc = self.left_dc[0][y4_start..left_end].to_vec();
+
+        let mut builder = LumaEntropyTraceBuilder::new(self.sym.cdf_states.len());
+        let mut blocks = Vec::with_capacity(cache.blocks.len());
+        let scan = &cdf::DEFAULT_SCAN_4X4;
+        for block in &cache.blocks {
+            let plan = &block.coeffs;
+            let x4 = block.sx >> 2;
+            let y4 = block.sy >> 2;
+            let start = builder.ops.len();
+            let txb_ctx = self.txb_skip_ctx(0, x4, y4, cache.bw, cache.bw * cache.bh);
+            builder.encode_symbol(
+                &mut self.sym,
+                usize::from(plan.eob == 0),
+                &cdf::TXB_SKIP[txb_ctx],
+            );
+            if plan.eob == 0 {
+                self.set_ctx(0, x4, y4, 0, 0);
+                let end = builder.ops.len();
+                blocks.push(LumaEntropyBlockTrace {
+                    x4,
+                    y4,
+                    start,
+                    base_end: end,
+                    end,
+                    check_after_base: false,
+                    cul: 0,
+                    dc_category: 0,
+                });
+                continue;
+            }
+
+            let eobpt = eobpt_from_eob(plan.eob);
+            builder.encode_symbol(&mut self.sym, eobpt - 1, &cdf::EOB_PT_16[0][0]);
+            if eobpt >= 3 {
+                let nbits = eobpt - 2;
+                let base = (1usize << (eobpt - 2)) + 1;
+                let extra = plan.eob - base;
+                builder.encode_symbol(
+                    &mut self.sym,
+                    (extra >> (nbits - 1)) & 1,
+                    &cdf::EOB_EXTRA[0][eobpt - 3],
+                );
+                let mut i = nbits as isize - 2;
+                while i >= 0 {
+                    builder.encode_literal(((extra >> i) & 1) as u32, 1);
+                    i -= 1;
+                }
+            }
+
+            for coeff in (0..plan.eob).rev() {
+                let ctx = plan.base_context[coeff];
+                if coeff == plan.eob - 1 {
+                    builder.encode_symbol(
+                        &mut self.sym,
+                        plan.base_symbol[coeff],
+                        &cdf::COEFF_BASE_EOB[0][ctx],
+                    );
+                } else {
+                    builder.encode_symbol(
+                        &mut self.sym,
+                        plan.base_symbol[coeff],
+                        &cdf::COEFF_BASE[0][ctx],
+                    );
+                }
+                for &brv in plan.br_values[coeff]
+                    .iter()
+                    .take(usize::from(plan.br_len[coeff]))
+                {
+                    builder.encode_symbol(
+                        &mut self.sym,
+                        usize::from(brv),
+                        &cdf::COEFF_BR[0][plan.br_context[coeff]],
+                    );
+                }
+            }
+            let base_end = builder.ops.len();
+
+            for (coeff, &pos) in scan.iter().enumerate().take(plan.eob) {
+                let level = plan.quant[pos].abs();
+                if level != 0 {
+                    let negative = plan.quant[pos] < 0;
+                    if coeff == 0 {
+                        let ctx = self.dc_sign_ctx(0, x4, y4);
+                        builder.encode_symbol(
+                            &mut self.sym,
+                            usize::from(negative),
+                            &cdf::DC_SIGN[0][ctx],
+                        );
+                    } else {
+                        builder.encode_literal(u32::from(negative), 1);
+                    }
+                    if level > COEFF_BASE_PLUS_RANGE {
+                        builder.encode_golomb((level - COEFF_BASE_PLUS_RANGE) as u32);
+                    }
+                }
+            }
+            self.set_ctx(0, x4, y4, plan.cul, plan.dc_category);
+            blocks.push(LumaEntropyBlockTrace {
+                x4,
+                y4,
+                start,
+                base_end,
+                end: builder.ops.len(),
+                check_after_base: true,
+                cul: plan.cul,
+                dc_category: plan.dc_category,
+            });
+        }
+
+        self.above_level[0][x4_start..above_end].copy_from_slice(&saved_above_level);
+        self.above_dc[0][x4_start..above_end].copy_from_slice(&saved_above_dc);
+        self.left_level[0][y4_start..left_end].copy_from_slice(&saved_left_level);
+        self.left_dc[0][y4_start..left_end].copy_from_slice(&saved_left_dc);
+
+        LumaEntropyTrace {
+            r: cache.r,
+            c: cache.c,
+            bw: cache.bw,
+            bh: cache.bh,
+            y_mode: cache.y_mode,
+            angle_delta: cache.angle_delta,
+            ops: builder.ops,
+            blocks,
+            cdfs: builder.cdfs,
+        }
+    }
+
+    fn replay_luma_entropy_trace(&mut self, trace: &LumaEntropyTrace) {
+        debug_assert!(trace.starts_from(&self.sym));
+        for block in &trace.blocks {
+            if self.probe_rate_limit_reached() {
+                return;
+            }
+            for &op in &trace.ops[block.start..block.base_end] {
+                op.replay(&mut self.sym.rate);
+            }
+            if block.check_after_base && self.probe_rate_limit_reached() {
+                self.mark_block_decoded_cell(0, block.y4, block.x4);
+                return;
+            }
+            for &op in &trace.ops[block.base_end..block.end] {
+                op.replay(&mut self.sym.rate);
+            }
+            self.set_ctx(0, block.x4, block.y4, block.cul, block.dc_category);
+            self.mark_block_decoded_cell(0, block.y4, block.x4);
+        }
+        trace.install_final_cdfs(&mut self.sym);
     }
 
     fn encode_cached_luma_unit(&mut self, cache: &LumaQuantCache) {
