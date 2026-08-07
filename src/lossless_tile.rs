@@ -677,7 +677,83 @@ struct BlockReplay {
 struct QuantizedBlock {
     sx: usize,
     sy: usize,
+    coeffs: CoeffPlan,
+}
+
+struct CoeffPlan {
     quant: [i32; 16],
+    eob: usize,
+    base_context: [usize; 16],
+    base_symbol: [usize; 16],
+    br_context: [usize; 16],
+    br_values: [[u8; 4]; 16],
+    br_len: [u8; 16],
+    cul: u8,
+    dc_category: u8,
+}
+
+impl CoeffPlan {
+    fn from_quant(quant: [i32; 16]) -> Self {
+        let scan = &cdf::DEFAULT_SCAN_4X4;
+        let mut eob = 0usize;
+        for c in 0..16 {
+            if quant[scan[c]] != 0 {
+                eob = c + 1;
+            }
+        }
+
+        let mut base_context = [0; 16];
+        let mut base_symbol = [0; 16];
+        let mut br_context = [0; 16];
+        let mut br_values = [[0; 4]; 16];
+        let mut br_len = [0; 16];
+        let mut levels = [0i32; 16];
+        let mut cul = 0i32;
+        for c in (0..eob).rev() {
+            let pos = scan[c];
+            let level = quant[pos].abs();
+            if c == eob - 1 {
+                base_context[c] = coeff_base_eob_ctx(c);
+                base_symbol[c] = (level.min(3) - 1) as usize;
+            } else {
+                base_context[c] = coeff_base_ctx(pos, &levels);
+                base_symbol[c] = level.min(3) as usize;
+            }
+            if level > NUM_BASE_LEVELS {
+                br_context[c] = coeff_br_ctx(pos, &levels);
+                let mut rem = level - 3;
+                for slot in br_values[c].iter_mut().take(4) {
+                    let value = rem.min(3);
+                    *slot = value as u8;
+                    br_len[c] += 1;
+                    rem -= value;
+                    if value < 3 {
+                        break;
+                    }
+                }
+            }
+            levels[pos] = level;
+            cul = (cul + level).min(7);
+        }
+        let dc_category = if quant[0] == 0 {
+            0
+        } else if quant[0] < 0 {
+            1
+        } else {
+            2
+        };
+        Self {
+            quant,
+            eob,
+            base_context,
+            base_symbol,
+            br_context,
+            br_values,
+            br_len,
+            cul: cul as u8,
+            dc_category,
+        }
+    }
 }
 
 struct LumaQuantCache {
@@ -3363,13 +3439,13 @@ impl<'a> FrameEncoder<'a> {
             if self.probe_rate_limit_reached() {
                 return;
             }
-            self.code_coeffs(
+            self.code_coeffs_cached(
                 0,
                 block.sx >> 2,
                 block.sy >> 2,
                 cache.bw,
                 cache.bw * cache.bh,
-                &block.quant,
+                &block.coeffs,
             );
             self.mark_block_decoded_cell(0, block.sy >> 2, block.sx >> 2);
         }
@@ -3403,7 +3479,7 @@ impl<'a> FrameEncoder<'a> {
                 blocks.push(QuantizedBlock {
                     sx: px,
                     sy: py,
-                    quant,
+                    coeffs: CoeffPlan::from_quant(quant),
                 });
                 self.mark_block_decoded_cell(0, py >> 2, px >> 2);
             }
@@ -3920,6 +3996,77 @@ impl<'a> FrameEncoder<'a> {
             2
         };
         self.set_ctx(plane, x4, y4, cul as u8, dc_cat);
+    }
+
+    fn code_coeffs_cached(
+        &mut self,
+        plane: usize,
+        x4: usize,
+        y4: usize,
+        block_width: usize,
+        block_area: usize,
+        plan: &CoeffPlan,
+    ) {
+        let _timing = Guard::new(Kind::CoeffCoding);
+        let ptype = usize::from(plane > 0);
+        let scan = &cdf::DEFAULT_SCAN_4X4;
+        let txb_ctx = self.txb_skip_ctx(plane, x4, y4, block_width, block_area);
+        self.sym
+            .encode_symbol(usize::from(plan.eob == 0), &cdf::TXB_SKIP[txb_ctx]);
+        if plan.eob == 0 {
+            self.set_ctx(plane, x4, y4, 0, 0);
+            return;
+        }
+
+        let eobpt = eobpt_from_eob(plan.eob);
+        self.sym.encode_symbol(eobpt - 1, &cdf::EOB_PT_16[ptype][0]);
+        if eobpt >= 3 {
+            let nbits = eobpt - 2;
+            let base = (1usize << (eobpt - 2)) + 1;
+            let extra = plan.eob - base;
+            self.sym.encode_symbol(
+                (extra >> (nbits - 1)) & 1,
+                &cdf::EOB_EXTRA[ptype][eobpt - 3],
+            );
+            let mut i = nbits as isize - 2;
+            while i >= 0 {
+                self.sym.encode_literal(((extra >> i) & 1) as u32, 1);
+                i -= 1;
+            }
+        }
+
+        for c in (0..plan.eob).rev() {
+            let ctx = plan.base_context[c];
+            if c == plan.eob - 1 {
+                self.sym
+                    .encode_symbol(plan.base_symbol[c], &cdf::COEFF_BASE_EOB[ptype][ctx]);
+            } else {
+                self.sym
+                    .encode_symbol(plan.base_symbol[c], &cdf::COEFF_BASE[ptype][ctx]);
+            }
+            for &brv in plan.br_values[c].iter().take(usize::from(plan.br_len[c])) {
+                self.sym
+                    .encode_symbol(usize::from(brv), &cdf::COEFF_BR[ptype][plan.br_context[c]]);
+            }
+        }
+
+        for (c, &pos) in scan.iter().enumerate().take(plan.eob) {
+            let level = plan.quant[pos].abs();
+            if level != 0 {
+                let neg = plan.quant[pos] < 0;
+                if c == 0 {
+                    let ctx = self.dc_sign_ctx(plane, x4, y4);
+                    self.sym
+                        .encode_symbol(usize::from(neg), &cdf::DC_SIGN[ptype][ctx]);
+                } else {
+                    self.sym.encode_literal(u32::from(neg), 1);
+                }
+                if level > COEFF_BASE_PLUS_RANGE {
+                    golomb(&mut self.sym, (level - COEFF_BASE_PLUS_RANGE) as u32);
+                }
+            }
+        }
+        self.set_ctx(plane, x4, y4, plan.cul, plan.dc_category);
     }
 
     fn set_ctx(&mut self, plane: usize, x4: usize, y4: usize, cul: u8, dc: u8) {
