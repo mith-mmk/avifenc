@@ -1,3 +1,6 @@
+[![crates.io](https://img.shields.io/crates/v/avifenc-rust)](https://crates.io/crates/avifenc-rust) ![license](https://img.shields.io/crates/l/avifenc-rust)
+[Japanese](./README.ja.md)
+
 # avifenc-rust
 
 Pure Rust AVIF still-image encoding backed by the Rust `rav1e` AV1 encoder.
