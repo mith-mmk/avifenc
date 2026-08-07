@@ -1,7 +1,7 @@
 # avif-rust API vocabulary review
 
 `avifenc-rust` keeps the public vocabulary aligned with the sibling
-`avif-rust` crate. The following table records the review for the 0.1.0 API.
+`avif-rust` crate. The following table records the review for the 0.0.6 API.
 
 | Concept | `avif-rust` | `avifenc-rust` | Compatibility decision |
 | --- | --- | --- | --- |
@@ -20,4 +20,3 @@
 The encoder-specific pull callback is named `PickCallback`, matching the
 existing `encode_pick` operation used by the `wml2` adapter. No public
 `EncoderConfig`, `encode_image`, or `ColorProfile` aliases are provided.
-

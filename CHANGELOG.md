@@ -1,6 +1,6 @@
 # Changelog
 
-## 0.1.0 - 2026-08-07
+## 0.0.6 - 2026-08-07
 
 - Added a Pure Rust AVIF still-image encoder backed by `rav1e`.
 - Added compatible RGBA, native-plane, metadata, and callback APIs.
