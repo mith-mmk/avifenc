@@ -46,6 +46,43 @@ const CDF_CACHE_SIZE: usize = 256;
 const MAX_BLOCK_DECODED_CELLS: usize = 16 * 16;
 const BLOCK_DECODED_SNAPSHOT_WORDS: usize = MAX_BLOCK_DECODED_CELLS / u64::BITS as usize;
 
+#[inline(always)]
+fn fwht_1d_inverse(input: [i64; 4]) -> [i64; 4] {
+    let a1 = input[0] + input[1];
+    let d1 = input[3] - input[2];
+    let e = (a1 - d1) >> 1;
+    let in3 = e - input[1];
+    let in1 = e - input[2];
+    let in0 = a1 - in1;
+    let in2 = d1 + in3;
+    [in0, in1, in2, in3]
+}
+
+#[inline(always)]
+fn fwht4x4_lossless(residual: &[i32; 16]) -> [i32; 16] {
+    let mut m = [[0i64; 4]; 4];
+    for j in 0..4 {
+        let column = [
+            i64::from(residual[j]),
+            i64::from(residual[4 + j]),
+            i64::from(residual[8 + j]),
+            i64::from(residual[12 + j]),
+        ];
+        let transformed = fwht_1d_inverse(column);
+        for i in 0..4 {
+            m[i][j] = transformed[i];
+        }
+    }
+    let mut quant = [0i32; 16];
+    for i in 0..4 {
+        let transformed = fwht_1d_inverse(m[i]);
+        for j in 0..4 {
+            quant[i * 4 + j] = transformed[j] as i32;
+        }
+    }
+    quant
+}
+
 #[derive(Clone)]
 struct AdaptiveCdfState {
     values: [u16; MAX_ADAPTIVE_CDF_LEN],
@@ -2923,7 +2960,7 @@ impl<'a> FrameEncoder<'a> {
                             self.sample(plane, px + x, py + y) - predictions[y * 4 + x];
                     }
                 }
-                cost += gamut_dsp::fwht4x4(&residual)
+                cost += fwht4x4_lossless(&residual)
                     .into_iter()
                     .map(|coefficient| u64::from(coefficient.unsigned_abs()))
                     .sum::<u64>();
@@ -2992,7 +3029,7 @@ impl<'a> FrameEncoder<'a> {
                     - self.predict_cfl_sample(base, alpha_q3, luma_deltas[index]);
             }
         }
-        gamut_dsp::fwht4x4(&residual)
+        fwht4x4_lossless(&residual)
             .into_iter()
             .map(|coefficient| u64::from(coefficient.unsigned_abs()))
             .sum()
@@ -3645,7 +3682,7 @@ impl<'a> FrameEncoder<'a> {
                 }
             }
         }
-        gamut_dsp::fwht4x4(&res)
+        fwht4x4_lossless(&res)
     }
 
     /// Builds one lossless 4×4 intra predictor while sharing its edge
@@ -4590,6 +4627,20 @@ mod tests {
         assert_eq!(fast.rng, general.rng);
         assert_eq!(fast.cnt, general.cnt);
         assert_eq!(fast.stream_bits, general.stream_bits);
+    }
+
+    #[test]
+    fn inline_lossless_wht_matches_gamut_dsp() {
+        let samples = [
+            [0; 16],
+            std::array::from_fn(|index| index as i32 - 8),
+            [
+                255, -255, 127, -127, 64, -64, 32, -32, 16, -16, 8, -8, 4, -4, 2, -2,
+            ],
+        ];
+        for residual in samples {
+            assert_eq!(fwht4x4_lossless(&residual), gamut_dsp::fwht4x4(&residual));
+        }
     }
 
     #[test]
