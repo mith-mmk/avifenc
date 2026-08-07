@@ -631,6 +631,9 @@ pub(crate) struct FrameEncoder<'a> {
     capture_rdo_trace: bool,
     block_replay: Option<BlockReplay>,
     luma_quant_cache: Option<LumaQuantCache>,
+    block_snapshot_pool: Vec<BlockContextSnapshot>,
+    leaf_snapshot_pool: Vec<LeafContextSnapshot>,
+    reconstruction_snapshot_pool: Vec<Vec<PlaneReconstructionSnapshot>>,
 }
 
 type MiContext = (usize, u8, bool, u8, u8, [u16; 8], u8, [u16; 8]);
@@ -766,6 +769,7 @@ struct LumaQuantCache {
     blocks: Vec<QuantizedBlock>,
 }
 
+#[derive(Default)]
 struct BlockContextSnapshot {
     planes: Vec<PlaneBlockContextSnapshot>,
     above_partition_start: usize,
@@ -775,6 +779,7 @@ struct BlockContextSnapshot {
     mi: Vec<MiContext>,
 }
 
+#[derive(Default)]
 struct PlaneBlockContextSnapshot {
     above_start: usize,
     above_level: Vec<u8>,
@@ -788,6 +793,7 @@ struct PlaneBlockContextSnapshot {
 // Lossless reconstruction always copies the source sample back into this
 // buffer. Probes therefore need to roll back only availability metadata; the
 // reconstructed sample values are invariant and do not need a pixel snapshot.
+#[derive(Clone, Copy, Default)]
 struct PlaneReconstructionSnapshot {
     block_decoded_x4: usize,
     block_decoded_y4: usize,
@@ -804,7 +810,7 @@ struct PlaneBlockRegion {
     height4: usize,
 }
 
-#[derive(Clone)]
+#[derive(Clone, Default)]
 struct LeafPlaneSnapshot {
     above_index: usize,
     above_level: u8,
@@ -816,7 +822,7 @@ struct LeafPlaneSnapshot {
     block_decoded: u8,
 }
 
-#[derive(Clone)]
+#[derive(Clone, Default)]
 struct LeafContextSnapshot {
     planes: Vec<LeafPlaneSnapshot>,
     mi: Option<MiContext>,
@@ -995,6 +1001,9 @@ impl<'a> FrameEncoder<'a> {
             capture_rdo_trace: false,
             block_replay: None,
             luma_quant_cache: None,
+            block_snapshot_pool: Vec::new(),
+            leaf_snapshot_pool: Vec::new(),
+            reconstruction_snapshot_pool: Vec::new(),
         }
     }
 
@@ -2019,41 +2028,65 @@ impl<'a> FrameEncoder<'a> {
         }
     }
 
-    fn snapshot_block_context(&self, r: usize, c: usize, bw: usize) -> BlockContextSnapshot {
+    fn snapshot_block_context(&mut self, r: usize, c: usize, bw: usize) -> BlockContextSnapshot {
         let _timing = Guard::new(Kind::Snapshot);
         let n4 = bw / 4;
         let reconstructions = self.snapshot_reconstruction_context(r, c, bw, bw);
-        let planes = reconstructions
-            .into_iter()
-            .enumerate()
-            .map(|(plane, reconstruction)| {
-                let region = self.plane_block_region(plane, r, c, bw, bw);
-                let above_start = region.x >> 2;
-                let above_end = (above_start + region.width4).min(self.above_level[plane].len());
-                let left_start = region.y >> 2;
-                let left_end = (left_start + region.height4).min(self.left_level[plane].len());
-                PlaneBlockContextSnapshot {
-                    above_start,
-                    above_level: self.above_level[plane][above_start..above_end].to_vec(),
-                    above_dc: self.above_dc[plane][above_start..above_end].to_vec(),
-                    left_start,
-                    left_level: self.left_level[plane][left_start..left_end].to_vec(),
-                    left_dc: self.left_dc[plane][left_start..left_end].to_vec(),
-                    reconstruction,
-                }
-            })
-            .collect();
+        let mut snapshot = self.block_snapshot_pool.pop().unwrap_or_default();
+        snapshot.planes.truncate(self.planes.len());
+        while snapshot.planes.len() < self.planes.len() {
+            snapshot.planes.push(PlaneBlockContextSnapshot::default());
+        }
+        for (plane, reconstruction) in reconstructions.iter().copied().enumerate() {
+            let region = self.plane_block_region(plane, r, c, bw, bw);
+            let above_start = region.x >> 2;
+            let above_end = (above_start + region.width4).min(self.above_level[plane].len());
+            let left_start = region.y >> 2;
+            let left_end = (left_start + region.height4).min(self.left_level[plane].len());
+            let saved = &mut snapshot.planes[plane];
+            saved.above_start = above_start;
+            saved.above_level.clear();
+            saved
+                .above_level
+                .extend_from_slice(&self.above_level[plane][above_start..above_end]);
+            saved.above_dc.clear();
+            saved
+                .above_dc
+                .extend_from_slice(&self.above_dc[plane][above_start..above_end]);
+            saved.left_start = left_start;
+            saved.left_level.clear();
+            saved
+                .left_level
+                .extend_from_slice(&self.left_level[plane][left_start..left_end]);
+            saved.left_dc.clear();
+            saved
+                .left_dc
+                .extend_from_slice(&self.left_dc[plane][left_start..left_end]);
+            saved.reconstruction = reconstruction;
+        }
+        self.reconstruction_snapshot_pool.push(reconstructions);
         let above_partition_start = c.min(self.mi_cols);
         let above_partition_end = (c + n4).min(self.mi_cols);
         let left_partition_start = r.min(self.mi_rows);
         let left_partition_end = (r + n4).min(self.mi_rows);
-        let mut mi = Vec::with_capacity(n4 * n4);
+        snapshot.above_partition_start = above_partition_start;
+        snapshot.above_partition.clear();
+        snapshot
+            .above_partition
+            .extend_from_slice(&self.above_partition[above_partition_start..above_partition_end]);
+        snapshot.left_partition_start = left_partition_start;
+        snapshot.left_partition.clear();
+        snapshot
+            .left_partition
+            .extend_from_slice(&self.left_partition[left_partition_start..left_partition_end]);
+        snapshot.mi.clear();
+        snapshot.mi.reserve(n4 * n4);
         for y in 0..n4 {
             for x in 0..n4 {
                 let (rr, cc) = (r + y, c + x);
                 if rr < self.mi_rows && cc < self.mi_cols {
                     let index = rr * self.mi_cols + cc;
-                    mi.push((
+                    snapshot.mi.push((
                         index,
                         self.mi_bsl[index],
                         self.mi_skip[index],
@@ -2066,20 +2099,12 @@ impl<'a> FrameEncoder<'a> {
                 }
             }
         }
-        BlockContextSnapshot {
-            planes,
-            above_partition_start,
-            above_partition: self.above_partition[above_partition_start..above_partition_end]
-                .to_vec(),
-            left_partition_start,
-            left_partition: self.left_partition[left_partition_start..left_partition_end].to_vec(),
-            mi,
-        }
+        snapshot
     }
 
     fn restore_block_context(&mut self, snapshot: BlockContextSnapshot) {
         let _timing = Guard::new(Kind::Restore);
-        for (plane, saved) in snapshot.planes.into_iter().enumerate() {
+        for (plane, saved) in snapshot.planes.iter().enumerate() {
             let above_end = saved.above_start + saved.above_level.len();
             self.above_level[plane][saved.above_start..above_end]
                 .copy_from_slice(&saved.above_level);
@@ -2095,8 +2120,8 @@ impl<'a> FrameEncoder<'a> {
         let left_partition_end = snapshot.left_partition_start + snapshot.left_partition.len();
         self.left_partition[snapshot.left_partition_start..left_partition_end]
             .copy_from_slice(&snapshot.left_partition);
-        for (index, bsl, skip, ymode, palette_size, colors, uv_palette_size, uv_colors) in
-            snapshot.mi
+        for &(index, bsl, skip, ymode, palette_size, colors, uv_palette_size, uv_colors) in
+            &snapshot.mi
         {
             self.mi_bsl[index] = bsl;
             self.mi_skip[index] = skip;
@@ -2106,6 +2131,7 @@ impl<'a> FrameEncoder<'a> {
             self.mi_uv_palette_size[index] = uv_palette_size;
             self.mi_uv_palette_colors[index] = uv_colors;
         }
+        self.block_snapshot_pool.push(snapshot);
     }
 
     fn plane_block_region(
@@ -2133,49 +2159,55 @@ impl<'a> FrameEncoder<'a> {
     }
 
     fn snapshot_reconstruction_context(
-        &self,
+        &mut self,
         r: usize,
         c: usize,
         bw: usize,
         bh: usize,
     ) -> Vec<PlaneReconstructionSnapshot> {
         let _timing = Guard::new(Kind::Snapshot);
-        (0..self.planes.len())
-            .map(|plane| {
-                let region = self.plane_block_region(plane, r, c, bw, bh);
-                let block_decoded_x4 = region.x >> 2;
-                let block_decoded_y4 = region.y >> 2;
-                let mut block_decoded = [0; BLOCK_DECODED_SNAPSHOT_WORDS];
-                for y in 0..region.height4 {
-                    for x in 0..region.width4 {
-                        let cell_r = block_decoded_y4 + y;
-                        let cell_c = block_decoded_x4 + x;
-                        let by = cell_r as isize - self.sb_r as isize;
-                        let bx = cell_c as isize - self.sb_c as isize;
-                        if (0..16).contains(&by) && (0..16).contains(&bx) {
-                            let index = (by + 1) as usize * BD_STRIDE + (bx + 1) as usize;
-                            let bit = y * 16 + x;
-                            block_decoded[bit / u64::BITS as usize] |=
-                                u64::from(self.block_decoded[plane][index])
-                                    << (bit % u64::BITS as usize);
-                        }
+        let mut snapshots = self.reconstruction_snapshot_pool.pop().unwrap_or_default();
+        snapshots.truncate(self.planes.len());
+        while snapshots.len() < self.planes.len() {
+            snapshots.push(PlaneReconstructionSnapshot::default());
+        }
+        for (plane, saved) in snapshots.iter_mut().enumerate().take(self.planes.len()) {
+            let region = self.plane_block_region(plane, r, c, bw, bh);
+            let block_decoded_x4 = region.x >> 2;
+            let block_decoded_y4 = region.y >> 2;
+            let mut block_decoded = [0; BLOCK_DECODED_SNAPSHOT_WORDS];
+            for y in 0..region.height4 {
+                for x in 0..region.width4 {
+                    let cell_r = block_decoded_y4 + y;
+                    let cell_c = block_decoded_x4 + x;
+                    let by = cell_r as isize - self.sb_r as isize;
+                    let bx = cell_c as isize - self.sb_c as isize;
+                    if (0..16).contains(&by) && (0..16).contains(&bx) {
+                        let index = (by + 1) as usize * BD_STRIDE + (bx + 1) as usize;
+                        let bit = y * 16 + x;
+                        block_decoded[bit / u64::BITS as usize] |=
+                            u64::from(self.block_decoded[plane][index])
+                                << (bit % u64::BITS as usize);
                     }
                 }
-                PlaneReconstructionSnapshot {
-                    block_decoded_x4,
-                    block_decoded_y4,
-                    block_decoded_width4: region.width4,
-                    block_decoded_height4: region.height4,
-                    block_decoded,
-                }
-            })
-            .collect()
+            }
+            *saved = PlaneReconstructionSnapshot {
+                block_decoded_x4,
+                block_decoded_y4,
+                block_decoded_width4: region.width4,
+                block_decoded_height4: region.height4,
+                block_decoded,
+            };
+        }
+        snapshots
     }
 
-    fn restore_reconstruction_context(&mut self, snapshots: Vec<PlaneReconstructionSnapshot>) {
-        for (plane, snapshot) in snapshots.into_iter().enumerate() {
+    fn restore_reconstruction_context(&mut self, mut snapshots: Vec<PlaneReconstructionSnapshot>) {
+        for (plane, snapshot) in snapshots.iter().copied().enumerate() {
             self.restore_plane_reconstruction(plane, snapshot);
         }
+        snapshots.clear();
+        self.reconstruction_snapshot_pool.push(snapshots);
     }
 
     fn restore_plane_reconstruction(
@@ -2356,52 +2388,53 @@ impl<'a> FrameEncoder<'a> {
         size
     }
 
-    fn snapshot_leaf_context(&self, r: usize, c: usize) -> LeafContextSnapshot {
-        let planes = (0..self.planes.len())
-            .map(|plane| {
-                let shift_x = if plane == 0 { 0 } else { self.subsampling_x };
-                let shift_y = if plane == 0 { 0 } else { self.subsampling_y };
-                let sx = (c * 4) >> shift_x;
-                let sy = (r * 4) >> shift_y;
-                let above_index = sx >> 2;
-                let left_index = sy >> 2;
-                let cell_r = sy >> 2;
-                let cell_c = sx >> 2;
-                let by = cell_r as isize - self.sb_r as isize;
-                let bx = cell_c as isize - self.sb_c as isize;
-                let block_decoded_index = (by + 1) as usize * BD_STRIDE + (bx + 1) as usize;
-                LeafPlaneSnapshot {
-                    above_index,
-                    above_level: self.above_level[plane][above_index],
-                    above_dc: self.above_dc[plane][above_index],
-                    left_index,
-                    left_level: self.left_level[plane][left_index],
-                    left_dc: self.left_dc[plane][left_index],
-                    block_decoded_index,
-                    block_decoded: self.block_decoded[plane][block_decoded_index],
-                }
-            })
-            .collect();
-        let index = r * self.mi_cols + c;
-        LeafContextSnapshot {
-            planes,
-            mi: (r < self.mi_rows && c < self.mi_cols).then(|| {
-                (
-                    index,
-                    self.mi_bsl[index],
-                    self.mi_skip[index],
-                    self.mi_ymode[index],
-                    self.mi_palette_size[index],
-                    self.mi_palette_colors[index],
-                    self.mi_uv_palette_size[index],
-                    self.mi_uv_palette_colors[index],
-                )
-            }),
+    fn snapshot_leaf_context(&mut self, r: usize, c: usize) -> LeafContextSnapshot {
+        let mut snapshot = self.leaf_snapshot_pool.pop().unwrap_or_default();
+        snapshot.planes.truncate(self.planes.len());
+        while snapshot.planes.len() < self.planes.len() {
+            snapshot.planes.push(LeafPlaneSnapshot::default());
         }
+        for plane in 0..self.planes.len() {
+            let shift_x = if plane == 0 { 0 } else { self.subsampling_x };
+            let shift_y = if plane == 0 { 0 } else { self.subsampling_y };
+            let sx = (c * 4) >> shift_x;
+            let sy = (r * 4) >> shift_y;
+            let above_index = sx >> 2;
+            let left_index = sy >> 2;
+            let cell_r = sy >> 2;
+            let cell_c = sx >> 2;
+            let by = cell_r as isize - self.sb_r as isize;
+            let bx = cell_c as isize - self.sb_c as isize;
+            let block_decoded_index = (by + 1) as usize * BD_STRIDE + (bx + 1) as usize;
+            snapshot.planes[plane] = LeafPlaneSnapshot {
+                above_index,
+                above_level: self.above_level[plane][above_index],
+                above_dc: self.above_dc[plane][above_index],
+                left_index,
+                left_level: self.left_level[plane][left_index],
+                left_dc: self.left_dc[plane][left_index],
+                block_decoded_index,
+                block_decoded: self.block_decoded[plane][block_decoded_index],
+            };
+        }
+        let index = r * self.mi_cols + c;
+        snapshot.mi = (r < self.mi_rows && c < self.mi_cols).then(|| {
+            (
+                index,
+                self.mi_bsl[index],
+                self.mi_skip[index],
+                self.mi_ymode[index],
+                self.mi_palette_size[index],
+                self.mi_palette_colors[index],
+                self.mi_uv_palette_size[index],
+                self.mi_uv_palette_colors[index],
+            )
+        });
+        snapshot
     }
 
     fn restore_leaf_context(&mut self, snapshot: LeafContextSnapshot, r: usize, c: usize) {
-        for (plane, saved) in snapshot.planes.into_iter().enumerate() {
+        for (plane, saved) in snapshot.planes.iter().enumerate() {
             self.above_level[plane][saved.above_index] = saved.above_level;
             self.above_dc[plane][saved.above_index] = saved.above_dc;
             self.left_level[plane][saved.left_index] = saved.left_level;
@@ -2420,6 +2453,7 @@ impl<'a> FrameEncoder<'a> {
             self.mi_uv_palette_size[index] = uv_palette_size;
             self.mi_uv_palette_colors[index] = uv_colors;
         }
+        self.leaf_snapshot_pool.push(snapshot);
     }
 
     #[allow(clippy::too_many_arguments)]
