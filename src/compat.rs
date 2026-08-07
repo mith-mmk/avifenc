@@ -93,7 +93,8 @@ pub struct EncoderOptions {
     pub quality: u8,
     /// Alpha quality in the libavif 0–100 scale.
     pub quality_alpha: u8,
-    /// rav1e speed preset, 0–10.
+    /// libavif-compatible speed preset, 0–10. Lossless encoding keeps the
+    /// complete search through 6 and uses fewer RDO candidates above 6.
     pub speed: u8,
     /// Request mathematically lossless encoding.
     pub lossless: bool,

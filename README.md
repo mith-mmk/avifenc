@@ -33,6 +33,12 @@ non-default CICP metadata combinations remain explicit
 `EncoderError::Unsupported` cases for lossless native/identity coding. Lossy
 paths use `rav1e`.
 
+The existing `EncoderOptions::speed` field also controls the lossless RDO
+search. Presets 0 through 6 retain the complete search used by the default;
+7 through 10 progressively reduce intra-mode, angle, and palette probes.
+All of these presets remain mathematically lossless, but faster presets can
+produce larger AVIF files, matching libavif's speed/size trade-off.
+
 The public-name comparison against `avif-rust` is recorded in
 [`API_COMPATIBILITY.md`](API_COMPATIBILITY.md).
 

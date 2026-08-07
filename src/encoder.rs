@@ -705,14 +705,13 @@ fn validate_lossless_options(
     bit_depth: u8,
     input_kind: &str,
 ) -> Result<(), EncoderError> {
-    if options.speed != EncoderOptions::default().speed
-        || options.jobs != 0
+    if options.jobs != 0
         || options.tile_rows_log2 != 0
         || options.tile_cols_log2 != 0
         || !options.advanced.is_empty()
     {
         return Err(EncoderError::Unsupported(format!(
-            "the lossless {input_kind} backend does not expose speed, jobs, tiling, or advanced controls"
+            "the lossless {input_kind} backend does not expose jobs, tiling, or advanced controls"
         )));
     }
     if let Some(pixi) = &options.pixel_information
@@ -771,9 +770,9 @@ fn encode_rgba8_with_lossless_items(
     }
     let primary = if color_lossless {
         if grayscale {
-            encode_rgba8_gray_lossless(image, width, height)?
+            encode_rgba8_gray_lossless(image, width, height, options.speed)?
         } else {
-            encode_rgba8_rgb_lossless(image, width, height)?
+            encode_rgba8_rgb_lossless(image, width, height, options.speed)?
         }
     } else {
         if grayscale {
@@ -873,26 +872,28 @@ fn encode_rgba8_gray_lossless(
     image: &ImageBuffer,
     width: u32,
     height: u32,
+    speed: u8,
 ) -> Result<EncodedFrame, EncoderError> {
     let gray = image
         .rgba
         .chunks_exact(4)
         .map(|pixel| u16::from(pixel[0]))
         .collect::<Vec<_>>();
-    encode_lossless_gray_samples(width, height, &gray, 8)
+    encode_lossless_gray_samples(width, height, &gray, 8, speed)
 }
 
 fn encode_rgba8_rgb_lossless(
     image: &ImageBuffer,
     width: u32,
     height: u32,
+    speed: u8,
 ) -> Result<EncodedFrame, EncoderError> {
     let rgb = image
         .rgba
         .chunks_exact(4)
         .flat_map(|pixel| pixel[..3].iter().copied())
         .collect::<Vec<_>>();
-    encode_gamut_lossless_frame(width, height, &rgb)
+    encode_gamut_lossless_frame(width, height, &rgb, speed)
 }
 
 fn encode_rgba8_alpha_lossless(
@@ -915,7 +916,7 @@ fn encode_rgba8_alpha_lossless(
         extended_channels: None,
     });
     validate_lossless_options(&alpha_options, 1, 8, "RGBA8 alpha")?;
-    encode_lossless_gray_samples(width, height, &alpha_samples, 8)
+    encode_lossless_gray_samples(width, height, &alpha_samples, 8, options.speed)
 }
 
 #[cfg(feature = "multithread")]
@@ -929,9 +930,9 @@ fn encode_rgba8_lossless_items_parallel(
     let (primary, alpha) = std::thread::scope(|scope| {
         let primary_handle = scope.spawn(|| {
             if grayscale {
-                encode_rgba8_gray_lossless(image, width, height)
+                encode_rgba8_gray_lossless(image, width, height, options.speed)
             } else {
-                encode_rgba8_rgb_lossless(image, width, height)
+                encode_rgba8_rgb_lossless(image, width, height, options.speed)
             }
         });
         let alpha_handle =
@@ -995,9 +996,9 @@ fn encode_rgba16_with_lossless_items(
                 .chunks_exact(3)
                 .map(|pixel| pixel[0])
                 .collect::<Vec<_>>();
-            encode_lossless_gray_samples(width, height, &gray, bit_depth)?
+            encode_lossless_gray_samples(width, height, &gray, bit_depth, options.speed)?
         } else {
-            encode_gamut_lossless_samples(width, height, &rgb, bit_depth)?
+            encode_gamut_lossless_samples(width, height, &rgb, bit_depth, options.speed)?
         }
     } else {
         if grayscale {
@@ -1066,6 +1067,7 @@ fn encode_rgba16_with_lossless_items(
                 height,
                 &alpha_samples,
                 bit_depth,
+                options.speed,
             )?)
         } else {
             let alpha_options = {
@@ -1192,7 +1194,7 @@ fn encode_lossless_native_full(
         full_range: color.full_range_flag,
         planes: planes.iter().map(|plane| plane.samples).collect(),
     };
-    let primary = encode_lossless_plane_set(&lossless_planes)?;
+    let primary = encode_lossless_plane_set(&lossless_planes, options.speed)?;
     let mut effective = effective_options(options, channels, bit_depth);
     if matches!(sampling, Sampling::Cs400 | Sampling::Cs444) {
         effective.color_information = Some(lossless_color_information());
@@ -1204,9 +1206,10 @@ fn encode_gamut_lossless_frame(
     width: u32,
     height: u32,
     rgb: &[u8],
+    speed: u8,
 ) -> Result<EncodedFrame, EncoderError> {
     let rgb = rgb.iter().copied().map(u16::from).collect::<Vec<_>>();
-    encode_gamut_lossless_samples(width, height, &rgb, 8)
+    encode_gamut_lossless_samples(width, height, &rgb, 8, speed)
 }
 
 fn encode_gamut_lossless_samples(
@@ -1214,6 +1217,7 @@ fn encode_gamut_lossless_samples(
     height: u32,
     rgb: &[u16],
     bit_depth: u8,
+    speed: u8,
 ) -> Result<EncodedFrame, EncoderError> {
     let sample_count = usize::try_from(width)
         .ok()
@@ -1265,7 +1269,7 @@ fn encode_gamut_lossless_samples(
         full_range: true,
         planes: vec![&g, &b, &r],
     };
-    encode_lossless_plane_set(&planes)
+    encode_lossless_plane_set(&planes, speed)
 }
 
 fn encode_lossless_gray_samples(
@@ -1273,6 +1277,7 @@ fn encode_lossless_gray_samples(
     height: u32,
     samples: &[u16],
     bit_depth: u8,
+    speed: u8,
 ) -> Result<EncodedFrame, EncoderError> {
     let expected = usize::try_from(width)
         .ok()
@@ -1308,11 +1313,14 @@ fn encode_lossless_gray_samples(
         full_range: true,
         planes: vec![samples],
     };
-    encode_lossless_plane_set(&planes)
+    encode_lossless_plane_set(&planes, speed)
 }
 
-fn encode_lossless_plane_set(planes: &LosslessPlanes<'_>) -> Result<EncodedFrame, EncoderError> {
-    let still = encode_still_lossless(planes)
+fn encode_lossless_plane_set(
+    planes: &LosslessPlanes<'_>,
+    speed: u8,
+) -> Result<EncodedFrame, EncoderError> {
+    let still = encode_still_lossless(planes, speed)
         .map_err(|error| EncoderError::Bitstream(error.to_string()))?;
     Ok(EncodedFrame {
         sequence_header: vec![

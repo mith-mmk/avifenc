@@ -636,6 +636,10 @@ fn palette_pairs_candidate(
 pub(crate) struct FrameEncoder<'a> {
     planes: Vec<&'a [u16]>,
     bit_depth: u8,
+    /// libavif-compatible speed preset.  The default (0..=6) keeps the
+    /// complete lossless search; higher values trade compression efficiency
+    /// for fewer RDO candidates while remaining pixel-exact.
+    speed: u8,
     monochrome: bool,
     subsampling_x: usize,
     subsampling_y: usize,
@@ -1060,6 +1064,7 @@ impl<'a> FrameEncoder<'a> {
         planes: &'a LosslessPlanes<'a>,
         screen_content_tools: bool,
         uv_palette_content: bool,
+        speed: u8,
     ) -> Self {
         let width = planes.width as usize;
         let height = planes.height as usize;
@@ -1135,6 +1140,7 @@ impl<'a> FrameEncoder<'a> {
         Self {
             planes: planes.planes.clone(),
             bit_depth: planes.bit_depth,
+            speed,
             monochrome: planes.monochrome,
             subsampling_x: usize::from(planes.subsampling_x),
             subsampling_y: usize::from(planes.subsampling_y),
@@ -1738,7 +1744,9 @@ impl<'a> FrameEncoder<'a> {
             );
             return;
         }
-        let palette_candidate = (bw == bh).then(|| self.palette_block(r, c, bw)).flatten();
+        let palette_candidate = (bw == bh && self.speed < 9)
+            .then(|| self.palette_block(r, c, bw))
+            .flatten();
         let mode_selection = if bw == bh {
             self.exact_skip_mode(r, c, bw)
                 .map(|y_mode| ModeSelection {
@@ -2793,6 +2801,27 @@ impl<'a> FrameEncoder<'a> {
         (size, trace)
     }
 
+    #[inline]
+    fn speed_allows_intra_mode(&self, mode: u8) -> bool {
+        match self.speed {
+            0..=6 => true,
+            7 => matches!(
+                mode,
+                DC_PRED
+                    | V_PRED
+                    | H_PRED
+                    | D45_PRED
+                    | D135_PRED
+                    | D67_PRED
+                    | SMOOTH_PRED
+                    | PAETH_PRED
+            ),
+            8 => matches!(mode, DC_PRED | V_PRED | H_PRED | SMOOTH_PRED | PAETH_PRED),
+            9 => matches!(mode, DC_PRED | V_PRED | H_PRED | PAETH_PRED),
+            _ => mode == DC_PRED,
+        }
+    }
+
     fn select_y_mode_shape(&mut self, r: usize, c: usize, bw: usize, bh: usize) -> ModeSelection {
         let _timing = Guard::new(Kind::ModeSearch);
         if bw != bh {
@@ -2838,7 +2867,7 @@ impl<'a> FrameEncoder<'a> {
             let mut ranked = candidates
                 .iter()
                 .copied()
-                .filter(|&mode| mode != DC_PRED)
+                .filter(|&mode| mode != DC_PRED && self.speed_allows_intra_mode(mode))
                 .map(|mode| (self.mode_cost_plane(0, r, c, bw, mode), mode))
                 .collect::<Vec<_>>();
             ranked.sort_unstable_by_key(|&(cost, _)| cost);
@@ -2848,7 +2877,12 @@ impl<'a> FrameEncoder<'a> {
                 .map(|(_, mode)| mode)
                 .collect::<Vec<_>>()
         } else {
-            candidates.iter().copied().skip(1).collect()
+            candidates
+                .iter()
+                .copied()
+                .skip(1)
+                .filter(|&mode| self.speed_allows_intra_mode(mode))
+                .collect()
         };
         let mut best_mode = DC_PRED;
         let initial_uv_selection = if self.monochrome {
@@ -2918,10 +2952,18 @@ impl<'a> FrameEncoder<'a> {
         // The trace has a fixed allocation/build cost. Restrict it to the
         // full candidate sets where several UV probes amortize that cost;
         // reduced edge candidate sets retain the original cached path.
+        let candidate_count = candidates
+            .iter()
+            .filter(|&&mode| self.speed_allows_intra_mode(mode))
+            .count();
         let luma_trace =
-            (candidates.len() >= 11).then(|| self.build_luma_entropy_trace(&luma_cache));
+            (candidate_count >= 11).then(|| self.build_luma_entropy_trace(&luma_cache));
         self.luma_quant_cache = Some(luma_cache);
-        let mut best_mode = candidates.first().copied().unwrap_or(DC_PRED);
+        let mut best_mode = candidates
+            .iter()
+            .copied()
+            .find(|&mode| self.speed_allows_intra_mode(mode))
+            .unwrap_or(DC_PRED);
         let mut best_size = self.measure_block_modes_local_with_limit_and_luma_trace(
             r,
             c,
@@ -2934,7 +2976,15 @@ impl<'a> FrameEncoder<'a> {
             limit,
             luma_trace.as_ref(),
         );
-        for &mode in candidates.iter().skip(1) {
+        let mut skipped_initial = false;
+        for &mode in candidates {
+            if !self.speed_allows_intra_mode(mode) {
+                continue;
+            }
+            if !skipped_initial {
+                skipped_initial = true;
+                continue;
+            }
             let candidate_limit = Some(limit.map_or(best_size, |value| value.min(best_size)));
             let size = self.measure_block_modes_local_with_limit_and_luma_trace(
                 r,
@@ -3089,7 +3139,7 @@ impl<'a> FrameEncoder<'a> {
         // AV1 signals angle_delta only for blocks at least 8x8.  Keeping the
         // guard here is important: a non-zero value would alter prediction
         // for a 4x4 transform without a corresponding syntax element.
-        if bw < 8 {
+        if bw < 8 || self.speed >= 8 {
             return (0, 0);
         }
         let (y_angle_delta, y_angle_rate) = if is_directional_mode(y_mode) {
@@ -4997,7 +5047,7 @@ mod tests {
         let (screen_content_tools, uv_palette_content) = screen_content_tool_flags(&planes);
         assert!(screen_content_tools);
         assert!(uv_palette_content);
-        let encoder = FrameEncoder::new(&planes, false, false);
+        let encoder = FrameEncoder::new(&planes, false, false, 6);
         assert!(!encoder.uv_palette_content);
         assert!(encoder.palette_block(0, 0, 8).is_none());
     }
@@ -5084,7 +5134,7 @@ mod tests {
             full_range: true,
             planes: vec![&samples],
         };
-        let encoder = FrameEncoder::new(&planes, true, false);
+        let encoder = FrameEncoder::new(&planes, true, false, 6);
 
         let predicted =
             [-512, -257, -4, 0, 4, 255, 512].map(|delta| encoder.predict_cfl_sample(128, 8, delta));
@@ -5112,7 +5162,7 @@ mod tests {
             full_range: true,
             planes: vec![&samples],
         };
-        let encoder = FrameEncoder::new(&planes, true, false);
+        let encoder = FrameEncoder::new(&planes, true, false, 6);
         let predicted = encoder.predict_block_4x4(0, 4, 4, SMOOTH_H_PRED, 0)[0];
         assert_eq!(predicted, 10);
     }
@@ -5136,7 +5186,7 @@ mod tests {
             full_range: true,
             planes: vec![&samples],
         };
-        let encoder = FrameEncoder::new(&planes, true, false);
+        let encoder = FrameEncoder::new(&planes, true, false, 6);
         let predicted = encoder.predict_block_4x4(0, 4, 4, SMOOTH_PRED, 0)[0];
         assert_eq!(predicted, 55);
     }
@@ -5162,7 +5212,7 @@ mod tests {
             full_range: true,
             planes: vec![&samples],
         };
-        let encoder = FrameEncoder::new(&planes, true, false);
+        let encoder = FrameEncoder::new(&planes, true, false, 6);
         for (mode, angle, expected) in [
             (
                 D45_PRED,

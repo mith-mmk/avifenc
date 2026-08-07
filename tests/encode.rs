@@ -99,6 +99,33 @@ fn grayscale_rgba_uses_a_monochrome_primary_item() {
 }
 
 #[test]
+fn lossless_speed_presets_are_accepted() {
+    let width = 32;
+    let height = 24;
+    let rgba = (0..width * height)
+        .flat_map(|index| {
+            let value = index as u8;
+            [value, value.rotate_left(1), value.rotate_left(2), u8::MAX]
+        })
+        .collect();
+    let image = ImageBuffer {
+        width,
+        height,
+        rgba,
+    };
+
+    for speed in 7..=10 {
+        let options = EncoderOptions {
+            lossless: true,
+            speed,
+            ..EncoderOptions::default()
+        };
+        let encoded = encode_bytes(&image, &options).unwrap();
+        assert!(encoded.windows(4).any(|window| window == b"av1C"));
+    }
+}
+
+#[test]
 fn monochrome_bilevel_blocks_use_compact_lossless_palette_coding() {
     let width: usize = 128;
     let height: usize = 128;

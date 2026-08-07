@@ -13,7 +13,10 @@ pub(crate) struct EncodedStill {
 }
 
 /// Encodes a full-resolution lossless plane set as one AV1 intra frame.
-pub(crate) fn encode_still_lossless(planes: &LosslessPlanes<'_>) -> Result<EncodedStill> {
+pub(crate) fn encode_still_lossless(
+    planes: &LosslessPlanes<'_>,
+    speed: u8,
+) -> Result<EncodedStill> {
     if planes.width == 0 || planes.height == 0 {
         return Err(Error::InvalidInput("image has a zero dimension"));
     }
@@ -68,7 +71,7 @@ pub(crate) fn encode_still_lossless(planes: &LosslessPlanes<'_>) -> Result<Encod
         screen_content_tools,
     );
     let encoded_frame =
-        FrameEncoder::new(planes, screen_content_tools, uv_palette_content).encode();
+        FrameEncoder::new(planes, screen_content_tools, uv_palette_content, speed).encode();
     frame_payload.extend_from_slice(&encoded_frame);
 
     Ok(EncodedStill {
