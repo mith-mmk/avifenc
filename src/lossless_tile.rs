@@ -87,12 +87,22 @@ impl AdaptiveCdfState {
             + u32::from(self.count > 31)
             + u32::from(self.adapt_base_rate);
         let body_len = usize::from(self.len) - 1;
-        let body = &mut self.values[..body_len];
-        for value in &mut body[..symbol] {
-            *value -= *value >> rate;
+        debug_assert!(symbol <= body_len);
+        let values = self.values.as_mut_ptr();
+        for index in 0..symbol {
+            // SAFETY: `symbol` is an AV1 CDF symbol index and therefore never
+            // exceeds the mutable CDF body length.
+            unsafe {
+                let value = values.add(index);
+                *value -= *value >> rate;
+            }
         }
-        for value in &mut body[symbol..] {
-            *value += ((1u16 << 15) - *value) >> rate;
+        for index in symbol..body_len {
+            // SAFETY: the range is bounded by the mutable CDF body length.
+            unsafe {
+                let value = values.add(index);
+                *value += ((1u16 << 15) - *value) >> rate;
+            }
         }
         if self.count < 32 {
             self.count += 1;
