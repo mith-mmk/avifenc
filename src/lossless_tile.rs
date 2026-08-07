@@ -42,7 +42,7 @@ impl Hasher for CdfKeyHasher {
 }
 
 const MAX_ADAPTIVE_CDF_LEN: usize = 16;
-const CDF_CACHE_SIZE: usize = 256;
+const CDF_CACHE_SIZE: usize = 512;
 const MAX_BLOCK_DECODED_CELLS: usize = 16 * 16;
 const BLOCK_DECODED_SNAPSHOT_WORDS: usize = MAX_BLOCK_DECODED_CELLS / u64::BITS as usize;
 
