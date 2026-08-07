@@ -148,10 +148,17 @@ impl RateEstimator {
         self.encode_q15(fl, fh, symbol as u32, nsyms);
     }
 
+    #[inline(always)]
+    fn encode_bool(&mut self, value: bool) {
+        let split = ((self.rng >> 8) * 128) + Self::EC_MIN_PROB;
+        let low = self.low + u64::from((self.rng - split) * u32::from(value));
+        let range = if value { split } else { self.rng - split };
+        self.normalize(low, range);
+    }
+
     fn encode_literal(&mut self, value: u32, bits: u32) {
-        const BOOL_CDF: [u16; 2] = [1 << 14, 1 << 15];
         for bit in (0..bits).rev() {
-            self.encode_symbol(((value >> bit) & 1) as usize, &BOOL_CDF);
+            self.encode_bool(((value >> bit) & 1) != 0);
         }
     }
 
@@ -1073,14 +1080,37 @@ impl<'a> FrameEncoder<'a> {
         force_dc: bool,
     ) {
         let num4x4 = bw / 4;
-        let half = num4x4 >> 1;
+        let h = bw / 2;
         let bsl = num4x4.trailing_zeros() as usize;
         let ctx = self.partition_ctx(r, c, bsl);
         self.sym.encode_symbol(partition, partition_cdf(bsl, ctx));
         if bw >= 8 && (partition == 0 || partition == 3 && bsl == 1) {
             self.update_partition_ctx(r, c, bsl, partition);
         }
+        self.encode_partition_children(r, c, bw, partition, child_rdo_depth, force_dc);
 
+        if bw >= 8 && matches!(partition, 1 | 2) {
+            // The decoder updates the parent partition context only after all
+            // HORZ/VERT children have been decoded.
+            if partition == 1 {
+                self.update_partition_ctx_shape(r, c, bw, bw, bw, h);
+            } else {
+                self.update_partition_ctx_shape(r, c, bw, bw, h, bw);
+            }
+        }
+    }
+
+    fn encode_partition_children(
+        &mut self,
+        r: usize,
+        c: usize,
+        bw: usize,
+        partition: usize,
+        child_rdo_depth: u8,
+        force_dc: bool,
+    ) {
+        let num4x4 = bw / 4;
+        let half = num4x4 >> 1;
         let h = bw / 2;
         match partition {
             0 => {
@@ -1111,15 +1141,6 @@ impl<'a> FrameEncoder<'a> {
             }
             _ => unreachable!("lossless partition RDO selected an invalid partition"),
         }
-        if bw >= 8 && matches!(partition, 1 | 2) {
-            // The decoder updates the parent partition context only after all
-            // HORZ/VERT children have been decoded.
-            if partition == 1 {
-                self.update_partition_ctx_shape(r, c, bw, bw, bw, h);
-            } else {
-                self.update_partition_ctx_shape(r, c, bw, bw, h, bw);
-            }
-        }
     }
 
     fn encode_partition_heuristic(&mut self, r: usize, c: usize, bw: usize, child_rdo_depth: u8) {
@@ -1129,21 +1150,25 @@ impl<'a> FrameEncoder<'a> {
         let has_cols = c + half < self.mi_cols;
         let bsl = num4x4.trailing_zeros() as usize; // Mi_Width_Log2
 
-        let partition = if bw < 8 {
-            0 // PARTITION_NONE forced, no symbol
-        } else if !self.monochrome
+        let mut replay_trace = None;
+        let can_try_split = !self.monochrome
             && self.subsampling_x == 0
             && self.subsampling_y == 0
             && bw >= 8
             && has_rows
             && has_cols
-            && !self.block_is_skippable(r, c, bw, DC_PRED)
-            // Large heuristic blocks still split to expose local predictors.
-            // At 16x16 and 8x8, compare the complete NONE and SPLIT syntax;
-            // forcing every textured block down to 4x4 spends far more mode
-            // and partition symbols than the residual reduction can repay.
-            && (bw > 16 || self.should_split_square_local(r, c, bw))
-        {
+            && !self.block_is_skippable(r, c, bw, DC_PRED);
+        let should_split = can_try_split
+            && if bw > 16 {
+                true
+            } else {
+                let (split, trace) = self.should_split_square_local(r, c, bw);
+                replay_trace = Some(trace);
+                split
+            };
+        let partition = if bw < 8 {
+            0 // PARTITION_NONE forced, no symbol
+        } else if should_split {
             let ctx = self.partition_ctx(r, c, bsl);
             self.sym.encode_symbol(3, partition_cdf(bsl, ctx)); // split for per-block DC prediction
             3
@@ -1173,14 +1198,17 @@ impl<'a> FrameEncoder<'a> {
             self.update_partition_ctx(r, c, bsl, partition);
         }
 
-        if partition == 0 {
-            self.encode_block(r, c, bw);
+        if let Some(decisions) = replay_trace.filter(|trace| !trace.is_empty()) {
+            let previous_replay = self.block_replay.take();
+            self.block_replay = Some(BlockReplay {
+                decisions,
+                next: 0,
+                failed: false,
+            });
+            self.encode_partition_children(r, c, bw, partition, child_rdo_depth, false);
+            self.block_replay = previous_replay;
         } else {
-            let h = bw / 2;
-            self.encode_partition_depth(r, c, h, child_rdo_depth);
-            self.encode_partition_depth(r, c + half, h, child_rdo_depth);
-            self.encode_partition_depth(r + half, c, h, child_rdo_depth);
-            self.encode_partition_depth(r + half, c + half, h, child_rdo_depth);
+            self.encode_partition_children(r, c, bw, partition, child_rdo_depth, false);
         }
     }
 
@@ -1840,10 +1868,24 @@ impl<'a> FrameEncoder<'a> {
             .then_some(DC_PRED)
     }
 
-    fn should_split_square_local(&mut self, r: usize, c: usize, bw: usize) -> bool {
-        let none_rate = self.measure_partition_local(r, c, bw, 0, 0, false);
-        let split_rate = self.measure_partition_local(r, c, bw, 3, 0, false);
-        split_rate < none_rate
+    fn should_split_square_local(
+        &mut self,
+        r: usize,
+        c: usize,
+        bw: usize,
+    ) -> (bool, Vec<BlockDecision>) {
+        let previous_capture = self.capture_rdo_trace;
+        self.capture_rdo_trace = true;
+        let (none_rate, none_trace) =
+            self.measure_partition_local_with_trace(r, c, bw, 0, 0, false);
+        let (split_rate, split_trace) =
+            self.measure_partition_local_with_trace(r, c, bw, 3, 0, false);
+        self.capture_rdo_trace = previous_capture;
+        if split_rate < none_rate {
+            (true, split_trace)
+        } else {
+            (false, none_trace)
+        }
     }
 
     fn snapshot_block_context(&self, r: usize, c: usize, bw: usize) -> BlockContextSnapshot {
@@ -2292,19 +2334,6 @@ impl<'a> FrameEncoder<'a> {
             self.mi_uv_palette_size[index] = uv_palette_size;
             self.mi_uv_palette_colors[index] = uv_colors;
         }
-    }
-
-    fn measure_partition_local(
-        &mut self,
-        r: usize,
-        c: usize,
-        bw: usize,
-        partition: usize,
-        child_rdo_depth: u8,
-        force_dc: bool,
-    ) -> usize {
-        self.measure_partition_local_with_trace(r, c, bw, partition, child_rdo_depth, force_dc)
-            .0
     }
 
     fn measure_partition_local_with_trace(
@@ -3723,6 +3752,7 @@ impl<'a> FrameEncoder<'a> {
 
         // Base levels + base range, scanned from the last coefficient back to DC.
         let mut levels = [0i32; 16];
+        let mut cul = 0i32;
         for c in (0..eob).rev() {
             let pos = scan[c];
             let level = quant[pos].abs();
@@ -3751,6 +3781,7 @@ impl<'a> FrameEncoder<'a> {
                 }
             }
             levels[pos] = level;
+            cul = (cul + level).min(7);
         }
 
         // Signs (DC sign is CDF-coded; the rest are raw bits) and golomb tails.
@@ -3775,7 +3806,6 @@ impl<'a> FrameEncoder<'a> {
         // magnitude, not as the full coefficient sum.  Keep the encoder's
         // context state identical so txb_skip and DC-sign contexts select the
         // same CDFs on both sides of the bitstream.
-        let cul = levels.iter().sum::<i32>().min(7) as u8;
         let dc_cat = if quant[0] == 0 {
             0
         } else if quant[0] < 0 {
@@ -3783,7 +3813,7 @@ impl<'a> FrameEncoder<'a> {
         } else {
             2
         };
-        self.set_ctx(plane, x4, y4, cul, dc_cat);
+        self.set_ctx(plane, x4, y4, cul as u8, dc_cat);
     }
 
     fn set_ctx(&mut self, plane: usize, x4: usize, y4: usize, cul: u8, dc: u8) {
@@ -4221,6 +4251,24 @@ mod tests {
         let mut unlikely = RateEstimator::new();
         unlikely.encode_symbol(3, &SKEWED_CDF);
         assert!(likely.rate_q10() < unlikely.rate_q10());
+    }
+
+    #[test]
+    fn rate_estimator_bool_path_matches_general_cdf_path() {
+        const BOOL_CDF: [u16; 2] = [1 << 14, 1 << 15];
+        let bits = [
+            true, false, false, true, true, false, true, false, false, true, false, true,
+        ];
+        let mut fast = RateEstimator::new();
+        let mut general = RateEstimator::new();
+        for bit in bits {
+            fast.encode_bool(bit);
+            general.encode_symbol(usize::from(bit), &BOOL_CDF);
+        }
+        assert_eq!(fast.low, general.low);
+        assert_eq!(fast.rng, general.rng);
+        assert_eq!(fast.cnt, general.cnt);
+        assert_eq!(fast.stream_bits, general.stream_bits);
     }
 
     #[test]
