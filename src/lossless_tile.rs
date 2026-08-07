@@ -322,10 +322,12 @@ impl AdaptiveSymbolEncoder {
         }
     }
 
+    #[inline(always)]
     fn encode_symbol(&mut self, symbol: usize, cdf: &'static [u16]) {
         self.encode_symbol_with_key(symbol, cdf, cdf.as_ptr() as usize);
     }
 
+    #[inline(always)]
     fn encode_symbol_with_key(&mut self, symbol: usize, cdf: &[u16], key: usize) {
         let index = self.cdf_state_index(key, cdf);
         let state = &mut self.cdf_states[index];
@@ -348,7 +350,7 @@ impl AdaptiveSymbolEncoder {
         }
     }
 
-    #[inline]
+    #[inline(always)]
     fn cdf_state_index(&mut self, key: usize, cdf: &[u16]) -> usize {
         let slot = ((key >> 1) ^ (key >> 9)) & (CDF_CACHE_SIZE - 1);
         let cached = self.cdf_cache[slot];
@@ -402,6 +404,7 @@ impl AdaptiveSymbolEncoder {
         self.cdf_states[index].values().to_vec()
     }
 
+    #[inline(always)]
     fn encode_literal(&mut self, value: u32, bits: u32) {
         self.rate.encode_literal(value, bits);
         if let Some(inner) = self.inner.as_mut() {
