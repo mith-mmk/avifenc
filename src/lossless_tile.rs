@@ -1785,6 +1785,13 @@ impl<'a> FrameEncoder<'a> {
             }
         }
 
+        // A probe that already lost on the block header cannot recover after
+        // residual coding. The final encoder leaves the limit unset, so this
+        // guard is RDO-only and does not change the emitted bitstream.
+        if self.probe_rate_limit_reached() {
+            return;
+        }
+
         for y in 0..n4_y {
             for x in 0..n4_x {
                 let (rr, cc) = (r + y, c + x);
@@ -3966,6 +3973,13 @@ impl<'a> FrameEncoder<'a> {
             cul = (cul + level).min(7);
         }
 
+        // Base/range symbols are enough to prove that a bounded probe cannot
+        // beat its incumbent in many cases. Avoid spending time on signs and
+        // Golomb tails; rollback discards this partial probe state.
+        if self.probe_rate_limit_reached() {
+            return;
+        }
+
         // Signs (DC sign is CDF-coded; the rest are raw bits) and golomb tails.
         for (c, &pos) in scan.iter().enumerate().take(eob) {
             let level = quant[pos].abs();
@@ -4048,6 +4062,10 @@ impl<'a> FrameEncoder<'a> {
                 self.sym
                     .encode_symbol(usize::from(brv), &cdf::COEFF_BR[ptype][plan.br_context[c]]);
             }
+        }
+
+        if self.probe_rate_limit_reached() {
+            return;
         }
 
         for (c, &pos) in scan.iter().enumerate().take(plan.eob) {
