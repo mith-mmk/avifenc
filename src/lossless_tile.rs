@@ -117,7 +117,6 @@ struct CdfCacheEntry {
 /// boundary.  The real `RangeEncoder` remains the sole bitstream writer.
 #[derive(Clone)]
 struct RateEstimator {
-    low: u64,
     rng: u32,
     cnt: i32,
     stream_bits: u32,
@@ -130,7 +129,6 @@ impl RateEstimator {
 
     fn new() -> Self {
         Self {
-            low: 0,
             rng: Self::CDF_PROB_TOP,
             cnt: -9,
             stream_bits: 0,
@@ -151,9 +149,8 @@ impl RateEstimator {
     #[inline(always)]
     fn encode_bool(&mut self, value: bool) {
         let split = ((self.rng >> 8) * 128) + Self::EC_MIN_PROB;
-        let low = self.low + u64::from((self.rng - split) * u32::from(value));
         let range = if value { split } else { self.rng - split };
-        self.normalize(low, range);
+        self.normalize(range);
     }
 
     fn encode_literal(&mut self, value: u32, bits: u32) {
@@ -163,7 +160,6 @@ impl RateEstimator {
     }
 
     fn encode_q15(&mut self, fl: u32, fh: u32, symbol: u32, nsyms: u32) {
-        let mut low = self.low;
         let mut range = self.rng;
         let n = nsyms - 1;
         if fl < Self::CDF_PROB_TOP {
@@ -171,7 +167,6 @@ impl RateEstimator {
                 + Self::EC_MIN_PROB * (n - (symbol - 1));
             let v = (((range >> 8) * (fh >> Self::EC_PROB_SHIFT)) >> (7 - Self::EC_PROB_SHIFT))
                 + Self::EC_MIN_PROB * (n - symbol);
-            low += u64::from(range - u);
             range = u - v;
         } else {
             let v = (((range >> 8) * (fh >> Self::EC_PROB_SHIFT)) >> (7 - Self::EC_PROB_SHIFT))
@@ -179,27 +174,22 @@ impl RateEstimator {
             range -= v;
         }
 
-        self.normalize(low, range);
+        self.normalize(range);
     }
 
-    fn normalize(&mut self, mut low: u64, range: u32) {
+    fn normalize(&mut self, range: u32) {
         let shift = range.leading_zeros() - 16;
         let mut cnt = self.cnt;
         let mut s = cnt + shift as i32;
         if s >= 0 {
             cnt += 16;
-            let mut mask = (1u64 << cnt) - 1;
             if s >= 8 {
                 self.stream_bits += 8;
-                low &= mask;
                 cnt -= 8;
-                mask = (1u64 << cnt) - 1;
             }
             self.stream_bits += 8;
             s = cnt + shift as i32 - 24;
-            low &= mask;
         }
-        self.low = low << shift;
         self.rng = range << shift;
         self.cnt = s;
     }
@@ -4531,7 +4521,6 @@ mod tests {
             fast.encode_bool(bit);
             general.encode_symbol(usize::from(bit), &BOOL_CDF);
         }
-        assert_eq!(fast.low, general.low);
         assert_eq!(fast.rng, general.rng);
         assert_eq!(fast.cnt, general.cnt);
         assert_eq!(fast.stream_bits, general.stream_bits);
