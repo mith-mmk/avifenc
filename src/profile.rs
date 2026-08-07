@@ -14,6 +14,9 @@ pub(crate) enum Kind {
     Container,
     ModeCost,
     CflSearch,
+    SkipCheck,
+    Transform,
+    CoeffCoding,
 }
 
 #[cfg(feature = "profile")]
@@ -22,8 +25,8 @@ mod enabled {
     use std::sync::atomic::{AtomicU64, Ordering};
     use std::time::Instant;
 
-    static NANOSECONDS: [AtomicU64; 14] = [const { AtomicU64::new(0) }; 14];
-    static CALLS: [AtomicU64; 14] = [const { AtomicU64::new(0) }; 14];
+    static NANOSECONDS: [AtomicU64; 17] = [const { AtomicU64::new(0) }; 17];
+    static CALLS: [AtomicU64; 17] = [const { AtomicU64::new(0) }; 17];
 
     fn index(kind: Kind) -> usize {
         match kind {
@@ -41,6 +44,9 @@ mod enabled {
             Kind::Container => 11,
             Kind::ModeCost => 12,
             Kind::CflSearch => 13,
+            Kind::SkipCheck => 14,
+            Kind::Transform => 15,
+            Kind::CoeffCoding => 16,
         }
     }
 
@@ -84,6 +90,9 @@ mod enabled {
             "container",
             "mode_cost",
             "cfl_search",
+            "skip_check",
+            "transform",
+            "coeff_coding",
         ];
         eprintln!("avifenc profile");
         for (index, name) in names.into_iter().enumerate() {

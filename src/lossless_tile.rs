@@ -630,6 +630,7 @@ pub(crate) struct FrameEncoder<'a> {
     decision_trace_active: bool,
     capture_rdo_trace: bool,
     block_replay: Option<BlockReplay>,
+    luma_quant_cache: Option<LumaQuantCache>,
 }
 
 type MiContext = (usize, u8, bool, u8, u8, [u16; 8], u8, [u16; 8]);
@@ -671,6 +672,22 @@ struct BlockReplay {
     decisions: Vec<BlockDecision>,
     next: usize,
     failed: bool,
+}
+
+struct QuantizedBlock {
+    sx: usize,
+    sy: usize,
+    quant: [i32; 16],
+}
+
+struct LumaQuantCache {
+    r: usize,
+    c: usize,
+    bw: usize,
+    bh: usize,
+    y_mode: u8,
+    angle_delta: i8,
+    blocks: Vec<QuantizedBlock>,
 }
 
 struct BlockContextSnapshot {
@@ -901,6 +918,7 @@ impl<'a> FrameEncoder<'a> {
             decision_trace_active: false,
             capture_rdo_trace: false,
             block_replay: None,
+            luma_quant_cache: None,
         }
     }
 
@@ -1732,6 +1750,23 @@ impl<'a> FrameEncoder<'a> {
         // residual(): decoder order is luma, then U/V only for chroma-reference blocks.
         if has_luma_palette {
             self.encode_palette_plane_unit(0, r, c, bw, bh);
+        } else if self.luma_quant_cache.is_some() {
+            let cached_luma = self
+                .luma_quant_cache
+                .take()
+                .expect("luma cache must be present");
+            if cached_luma.r == r
+                && cached_luma.c == c
+                && cached_luma.bw == bw
+                && cached_luma.bh == bh
+                && cached_luma.y_mode == y_mode
+                && cached_luma.angle_delta == y_angle_delta
+            {
+                self.encode_cached_luma_unit(&cached_luma);
+            } else {
+                self.encode_plane_unit(0, r, c, bw, bh, y_mode, y_angle_delta, None);
+            }
+            self.luma_quant_cache = Some(cached_luma);
         } else {
             self.encode_plane_unit(0, r, c, bw, bh, y_mode, y_angle_delta, None);
         }
@@ -1804,6 +1839,7 @@ impl<'a> FrameEncoder<'a> {
         y_mode: u8,
         uv_mode: u8,
     ) -> bool {
+        let _timing = Guard::new(Kind::SkipCheck);
         if bw == 4 && bh == 4 {
             for plane in 0..self.planes.len() {
                 let shift_x = if plane == 0 { 0 } else { self.subsampling_x };
@@ -2471,6 +2507,8 @@ impl<'a> FrameEncoder<'a> {
         candidates: &[u8],
         limit: Option<usize>,
     ) -> UvModeSelection {
+        let previous_cache = self.luma_quant_cache.take();
+        self.luma_quant_cache = Some(self.build_luma_quant_cache(r, c, bw, bw, y_mode, 0));
         let mut best_mode = candidates.first().copied().unwrap_or(DC_PRED);
         let mut best_size = self
             .measure_block_modes_local_with_limit(r, c, bw, y_mode, best_mode, None, 0, 0, limit);
@@ -2492,6 +2530,7 @@ impl<'a> FrameEncoder<'a> {
                 best_size = size;
             }
         }
+        self.luma_quant_cache = previous_cache;
         UvModeSelection {
             mode: best_mode,
             rate: Some(best_size),
@@ -2672,6 +2711,11 @@ impl<'a> FrameEncoder<'a> {
         } else {
             (0, zero_angle_rate)
         };
+        let previous_cache = self.luma_quant_cache.take();
+        if !self.monochrome && is_directional_mode(uv_mode) {
+            self.luma_quant_cache =
+                Some(self.build_luma_quant_cache(r, c, bw, bw, y_mode, y_angle_delta));
+        }
         let uv_angle_delta = if !self.monochrome && is_directional_mode(uv_mode) {
             let mut best_delta = -3i8;
             let mut best_size = self.measure_block_modes_local_with_angles(
@@ -2721,6 +2765,7 @@ impl<'a> FrameEncoder<'a> {
         } else {
             0
         };
+        self.luma_quant_cache = previous_cache;
         (y_angle_delta, uv_angle_delta)
     }
 
@@ -3313,6 +3358,68 @@ impl<'a> FrameEncoder<'a> {
         }
     }
 
+    fn encode_cached_luma_unit(&mut self, cache: &LumaQuantCache) {
+        for block in &cache.blocks {
+            if self.probe_rate_limit_reached() {
+                return;
+            }
+            self.code_coeffs(
+                0,
+                block.sx >> 2,
+                block.sy >> 2,
+                cache.bw,
+                cache.bw * cache.bh,
+                &block.quant,
+            );
+            self.mark_block_decoded_cell(0, block.sy >> 2, block.sx >> 2);
+        }
+    }
+
+    fn build_luma_quant_cache(
+        &mut self,
+        r: usize,
+        c: usize,
+        bw: usize,
+        bh: usize,
+        y_mode: u8,
+        angle_delta: i8,
+    ) -> LumaQuantCache {
+        let snapshot = self.snapshot_reconstruction_context(r, c, bw, bh);
+        let sx = c * 4;
+        let sy = r * 4;
+        let unit_w = bw.max(4);
+        let unit_h = bh.max(4);
+        let n_x = unit_w.div_ceil(4);
+        let n_y = unit_h.div_ceil(4);
+        let mut blocks = Vec::with_capacity(n_x * n_y);
+        for ty in 0..n_y {
+            for tx in 0..n_x {
+                let px = sx + tx * 4;
+                let py = sy + ty * 4;
+                if px >= self.plane_coded_widths[0] || py >= self.plane_coded_heights[0] {
+                    continue;
+                }
+                let quant = self.transform_quant(0, px, py, y_mode, angle_delta, None);
+                blocks.push(QuantizedBlock {
+                    sx: px,
+                    sy: py,
+                    quant,
+                });
+                self.mark_block_decoded_cell(0, py >> 2, px >> 2);
+            }
+        }
+        self.restore_reconstruction_context(snapshot);
+        LumaQuantCache {
+            r,
+            c,
+            bw,
+            bh,
+            y_mode,
+            angle_delta,
+            blocks,
+        }
+    }
+
     fn encode_palette_plane_unit(
         &mut self,
         plane: usize,
@@ -3360,6 +3467,21 @@ impl<'a> FrameEncoder<'a> {
         _block_sy: usize,
         cfl_alpha_q3: Option<i8>,
     ) {
+        let _timing = Guard::new(Kind::Transform);
+        let quant = self.transform_quant(plane, sx, sy, mode, angle_delta, cfl_alpha_q3);
+        self.code_coeffs(plane, sx >> 2, sy >> 2, block_width, block_area, &quant);
+        self.reconstruct_source_block(plane, sx, sy);
+    }
+
+    fn transform_quant(
+        &self,
+        plane: usize,
+        sx: usize,
+        sy: usize,
+        mode: u8,
+        angle_delta: i8,
+        cfl_alpha_q3: Option<i8>,
+    ) -> [i32; 16] {
         let mut res = [0i32; 16];
         let cfl_prediction = cfl_alpha_q3.map(|alpha_q3| {
             debug_assert!(plane > 0);
@@ -3402,9 +3524,7 @@ impl<'a> FrameEncoder<'a> {
                 }
             }
         }
-        let quant = gamut_dsp::fwht4x4(&res);
-        self.code_coeffs(plane, sx >> 2, sy >> 2, block_width, block_area, &quant);
-        self.reconstruct_source_block(plane, sx, sy);
+        gamut_dsp::fwht4x4(&res)
     }
 
     /// Builds one lossless 4×4 intra predictor while sharing its edge
@@ -3699,6 +3819,7 @@ impl<'a> FrameEncoder<'a> {
         block_area: usize,
         quant: &[i32; 16],
     ) {
+        let _timing = Guard::new(Kind::CoeffCoding);
         let ptype = usize::from(plane > 0);
         let scan = &cdf::DEFAULT_SCAN_4X4;
 
