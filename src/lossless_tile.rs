@@ -225,6 +225,21 @@ impl RateEstimator {
         }
         total_bits * 1024 - fractional
     }
+
+    #[inline]
+    fn rate_q10_at_least(&self, limit: u64) -> bool {
+        let total_bits =
+            u64::from(self.stream_bits).saturating_add_signed(i64::from(self.cnt) + 10);
+        let upper = total_bits.saturating_mul(1024);
+        let lower = upper.saturating_sub(1023);
+        if lower >= limit {
+            true
+        } else if upper < limit {
+            false
+        } else {
+            self.rate_q10() >= limit
+        }
+    }
 }
 
 #[derive(Clone)]
@@ -2174,7 +2189,7 @@ impl<'a> FrameEncoder<'a> {
     fn probe_rate_limit_reached(&mut self) -> bool {
         if !self.probe_rate_limited
             && let Some(limit) = self.probe_rate_limit
-            && self.sym.rate.rate_q10() >= limit
+            && self.sym.rate.rate_q10_at_least(limit)
         {
             self.probe_rate_limited = true;
         }
@@ -4237,6 +4252,19 @@ mod tests {
         let mut unlikely = RateEstimator::new();
         unlikely.encode_symbol(3, &SKEWED_CDF);
         assert!(likely.rate_q10() < unlikely.rate_q10());
+    }
+
+    #[test]
+    fn rate_limit_bounds_match_exact_rate_comparison() {
+        const CDF: [u16; 4] = [8192, 20_480, 30_720, 32_768];
+        let mut rate = RateEstimator::new();
+        for symbol in [0, 3, 1, 2, 3, 0, 1, 3] {
+            rate.encode_symbol(symbol, &CDF);
+        }
+        let exact = rate.rate_q10();
+        for limit in [0, exact.saturating_sub(1), exact, exact + 1, exact + 1023] {
+            assert_eq!(rate.rate_q10_at_least(limit), exact >= limit);
+        }
     }
 
     #[test]
