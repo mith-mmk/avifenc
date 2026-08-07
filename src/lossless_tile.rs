@@ -1030,7 +1030,7 @@ impl<'a> FrameEncoder<'a> {
         let crosses_visible_edge =
             r * 4 + bw > self.plane_heights[0] || c * 4 + bw > self.plane_widths[0];
         let (initial_size, mut best_trace) =
-            self.measure_partition_local_with_trace(r, c, bw, 0, 0, false);
+            self.measure_partition_local_with_trace(r, c, bw, 0, 0, false, None);
         let mut best = (initial_size, 0usize);
         if has_rows && has_cols {
             // Rectangular children are especially useful at 16×16, where
@@ -1039,8 +1039,15 @@ impl<'a> FrameEncoder<'a> {
             // RDO has enough coverage for larger blocks.
             if bw == 16 && !crosses_visible_edge {
                 for partition in [1usize, 2] {
-                    let (size, trace) =
-                        self.measure_partition_local_with_trace(r, c, bw, partition, 0, false);
+                    let (size, trace) = self.measure_partition_local_with_trace(
+                        r,
+                        c,
+                        bw,
+                        partition,
+                        0,
+                        false,
+                        Some(best.0),
+                    );
                     if size < best.0 {
                         best = (size, partition);
                         best_trace = trace;
@@ -1048,8 +1055,15 @@ impl<'a> FrameEncoder<'a> {
                 }
             }
             let partition = 3;
-            let (size, trace) =
-                self.measure_partition_local_with_trace(r, c, bw, partition, child_depth, false);
+            let (size, trace) = self.measure_partition_local_with_trace(
+                r,
+                c,
+                bw,
+                partition,
+                child_depth,
+                false,
+                Some(best.0),
+            );
             if size < best.0 {
                 best = (size, partition);
                 best_trace = trace;
@@ -1877,9 +1891,9 @@ impl<'a> FrameEncoder<'a> {
         let previous_capture = self.capture_rdo_trace;
         self.capture_rdo_trace = true;
         let (none_rate, none_trace) =
-            self.measure_partition_local_with_trace(r, c, bw, 0, 0, false);
+            self.measure_partition_local_with_trace(r, c, bw, 0, 0, false, None);
         let (split_rate, split_trace) =
-            self.measure_partition_local_with_trace(r, c, bw, 3, 0, false);
+            self.measure_partition_local_with_trace(r, c, bw, 3, 0, false, Some(none_rate));
         self.capture_rdo_trace = previous_capture;
         if split_rate < none_rate {
             (true, split_trace)
@@ -2336,6 +2350,7 @@ impl<'a> FrameEncoder<'a> {
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn measure_partition_local_with_trace(
         &mut self,
         r: usize,
@@ -2344,6 +2359,7 @@ impl<'a> FrameEncoder<'a> {
         partition: usize,
         child_rdo_depth: u8,
         force_dc: bool,
+        limit: Option<usize>,
     ) -> (usize, Vec<BlockDecision>) {
         let _timing = Guard::new(Kind::PartitionMeasure);
         let capture = self.capture_rdo_trace && self.decision_trace_stack.is_empty();
@@ -2355,11 +2371,22 @@ impl<'a> FrameEncoder<'a> {
         let snapshot = self.snapshot_block_context(r, c, bw);
         let saved_rate = self.sym.rate.clone();
         let saved_rate_q10 = saved_rate.rate_q10();
+        let previous_limit = self.probe_rate_limit;
+        let previous_limited = self.probe_rate_limited;
         let checkpoint = self.begin_probe(saved_rate);
+        self.probe_rate_limit = limit
+            .map(|value| saved_rate_q10.saturating_add(u64::try_from(value).unwrap_or(u64::MAX)));
+        self.probe_rate_limited = false;
         self.encode_partition_choice(r, c, bw, partition, child_rdo_depth, force_dc);
-        let size = (self.sym.rate.rate_q10() - saved_rate_q10) as usize;
+        let size = if self.probe_rate_limited {
+            limit.unwrap_or(usize::MAX)
+        } else {
+            (self.sym.rate.rate_q10() - saved_rate_q10) as usize
+        };
         self.restore_block_context(snapshot);
         self.end_probe(checkpoint);
+        self.probe_rate_limit = previous_limit;
+        self.probe_rate_limited = previous_limited;
         let trace = if capture {
             self.decision_trace_active = previous_active;
             self.decision_trace_stack
