@@ -93,6 +93,7 @@ struct AdaptiveCdfState {
 }
 
 impl AdaptiveCdfState {
+    #[inline(always)]
     fn new(cdf: &[u16]) -> Self {
         assert!(
             cdf.len() <= MAX_ADAPTIVE_CDF_LEN,
@@ -109,15 +110,17 @@ impl AdaptiveCdfState {
         }
     }
 
+    #[inline(always)]
     fn values(&self) -> &[u16] {
         &self.values[..usize::from(self.len)]
     }
 
+    #[inline(always)]
     fn values_mut(&mut self) -> &mut [u16] {
         &mut self.values[..usize::from(self.len)]
     }
 
-    #[inline]
+    #[inline(always)]
     fn adapt(&mut self, symbol: usize) {
         let rate = 3
             + u32::from(self.count > 15)
