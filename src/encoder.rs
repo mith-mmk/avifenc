@@ -765,21 +765,15 @@ fn encode_rgba8_with_lossless_items(
         .map_err(|_| EncoderError::InvalidParam("image width exceeds u32".to_string()))?;
     let height = u32::try_from(image.height)
         .map_err(|_| EncoderError::InvalidParam("image height exceeds u32".to_string()))?;
+    #[cfg(feature = "multithread")]
+    if has_alpha && color_lossless && alpha_lossless && options.jobs == 0 {
+        return encode_rgba8_lossless_items_parallel(image, options, grayscale, width, height);
+    }
     let primary = if color_lossless {
         if grayscale {
-            let gray = image
-                .rgba
-                .chunks_exact(4)
-                .map(|pixel| u16::from(pixel[0]))
-                .collect::<Vec<_>>();
-            encode_lossless_gray_samples(width, height, &gray, 8)?
+            encode_rgba8_gray_lossless(image, width, height)?
         } else {
-            let rgb = image
-                .rgba
-                .chunks_exact(4)
-                .flat_map(|pixel| pixel[..3].iter().copied())
-                .collect::<Vec<_>>();
-            encode_gamut_lossless_frame(width, height, &rgb)?
+            encode_rgba8_rgb_lossless(image, width, height)?
         }
     } else {
         if grayscale {
@@ -831,31 +825,14 @@ fn encode_rgba8_with_lossless_items(
         }
     };
     let alpha = if has_alpha {
-        let alpha_samples = image
-            .rgba
-            .chunks_exact(4)
-            .map(|pixel| u16::from(pixel[3]))
-            .collect::<Vec<_>>();
         if alpha_lossless {
-            let alpha_options = {
-                let mut value = options.clone();
-                value.quality = options.quality_alpha;
-                value.quality_alpha = options.quality_alpha;
-                value.color_information = None;
-                value.pixel_information = Some(PixelInformation {
-                    bits_per_channel: vec![8],
-                    extended_channels: None,
-                });
-                value
-            };
-            validate_lossless_options(&alpha_options, 1, 8, "RGBA8 alpha")?;
-            Some(encode_lossless_gray_samples(
-                width,
-                height,
-                &alpha_samples,
-                8,
-            )?)
+            Some(encode_rgba8_alpha_lossless(image, options, width, height)?)
         } else {
+            let alpha_samples = image
+                .rgba
+                .chunks_exact(4)
+                .map(|pixel| u16::from(pixel[3]))
+                .collect::<Vec<_>>();
             let alpha_options = {
                 let mut value = options.clone();
                 value.quality = options.quality_alpha;
@@ -888,6 +865,92 @@ fn encode_rgba8_with_lossless_items(
         height as usize,
         &primary,
         alpha.as_ref(),
+        &effective,
+    )
+}
+
+fn encode_rgba8_gray_lossless(
+    image: &ImageBuffer,
+    width: u32,
+    height: u32,
+) -> Result<EncodedFrame, EncoderError> {
+    let gray = image
+        .rgba
+        .chunks_exact(4)
+        .map(|pixel| u16::from(pixel[0]))
+        .collect::<Vec<_>>();
+    encode_lossless_gray_samples(width, height, &gray, 8)
+}
+
+fn encode_rgba8_rgb_lossless(
+    image: &ImageBuffer,
+    width: u32,
+    height: u32,
+) -> Result<EncodedFrame, EncoderError> {
+    let rgb = image
+        .rgba
+        .chunks_exact(4)
+        .flat_map(|pixel| pixel[..3].iter().copied())
+        .collect::<Vec<_>>();
+    encode_gamut_lossless_frame(width, height, &rgb)
+}
+
+fn encode_rgba8_alpha_lossless(
+    image: &ImageBuffer,
+    options: &EncoderOptions,
+    width: u32,
+    height: u32,
+) -> Result<EncodedFrame, EncoderError> {
+    let alpha_samples = image
+        .rgba
+        .chunks_exact(4)
+        .map(|pixel| u16::from(pixel[3]))
+        .collect::<Vec<_>>();
+    let mut alpha_options = options.clone();
+    alpha_options.quality = options.quality_alpha;
+    alpha_options.quality_alpha = options.quality_alpha;
+    alpha_options.color_information = None;
+    alpha_options.pixel_information = Some(PixelInformation {
+        bits_per_channel: vec![8],
+        extended_channels: None,
+    });
+    validate_lossless_options(&alpha_options, 1, 8, "RGBA8 alpha")?;
+    encode_lossless_gray_samples(width, height, &alpha_samples, 8)
+}
+
+#[cfg(feature = "multithread")]
+fn encode_rgba8_lossless_items_parallel(
+    image: &ImageBuffer,
+    options: &EncoderOptions,
+    grayscale: bool,
+    width: u32,
+    height: u32,
+) -> Result<Vec<u8>, EncoderError> {
+    let (primary, alpha) = std::thread::scope(|scope| {
+        let primary_handle = scope.spawn(|| {
+            if grayscale {
+                encode_rgba8_gray_lossless(image, width, height)
+            } else {
+                encode_rgba8_rgb_lossless(image, width, height)
+            }
+        });
+        let alpha_handle =
+            scope.spawn(|| encode_rgba8_alpha_lossless(image, options, width, height));
+        let primary = primary_handle
+            .join()
+            .map_err(|_| EncoderError::Bitstream("color encode panicked".to_string()))??;
+        let alpha = alpha_handle
+            .join()
+            .map_err(|_| EncoderError::Bitstream("alpha encode panicked".to_string()))??;
+        Ok::<_, EncoderError>((primary, alpha))
+    })?;
+    let mut effective = effective_image_options(options, if grayscale { 1 } else { 3 }, 8);
+    effective.color_information = Some(lossless_color_information());
+    write_avif(
+        width as usize,
+        height as usize,
+        &primary,
+        Some(&alpha),
         &effective,
     )
 }
