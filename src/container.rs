@@ -1,7 +1,10 @@
 use crate::encoder::EncodedFrame;
 use crate::error::EncoderError;
 use crate::profile::{Guard, Kind};
-use crate::{ColorInformation, EncoderOptions, PixelInformation};
+use crate::{
+    ColorInformation, EncoderOptions, NativeColorInformation, NclxColorInformation,
+    PixelInformation,
+};
 
 const PRIMARY_ITEM_ID: u16 = 1;
 const ALPHA_ITEM_ID: u16 = 2;
@@ -16,6 +19,17 @@ struct MetaBoxInput<'a> {
     alpha: Option<&'a EncodedFrame>,
     item_count: u16,
     options: &'a EncoderOptions,
+    rich_color: Option<&'a NativeColorInformation>,
+    native_color: Option<&'a NativeColorSource<'a>>,
+}
+
+/// Borrowed native colour data passed from the checked encoder plan to both
+/// metadata passes. The ICC slice is never cloned while sizing or assembling
+/// the container; the final `ipco` payload is the owning output copy.
+pub(crate) struct NativeColorSource<'a> {
+    pub(crate) nclx: NclxColorInformation,
+    pub(crate) icc_profile: Option<&'a [u8]>,
+    pub(crate) icc_color_type: Option<[u8; 4]>,
 }
 
 pub(crate) fn write_avif(
@@ -24,6 +38,48 @@ pub(crate) fn write_avif(
     primary: &EncodedFrame,
     alpha: Option<&EncodedFrame>,
     options: &EncoderOptions,
+) -> Result<Vec<u8>, EncoderError> {
+    write_avif_with_color_set(width, height, primary, alpha, options, None)
+}
+
+pub(crate) fn write_avif_with_color_set(
+    width: usize,
+    height: usize,
+    primary: &EncodedFrame,
+    alpha: Option<&EncodedFrame>,
+    options: &EncoderOptions,
+    rich_color: Option<&NativeColorInformation>,
+) -> Result<Vec<u8>, EncoderError> {
+    write_avif_with_sources(width, height, primary, alpha, options, rich_color, None)
+}
+
+pub(crate) fn write_avif_with_native_color_source(
+    width: usize,
+    height: usize,
+    primary: &EncodedFrame,
+    alpha: Option<&EncodedFrame>,
+    options: &EncoderOptions,
+    native_color: &NativeColorSource<'_>,
+) -> Result<Vec<u8>, EncoderError> {
+    write_avif_with_sources(
+        width,
+        height,
+        primary,
+        alpha,
+        options,
+        None,
+        Some(native_color),
+    )
+}
+
+fn write_avif_with_sources(
+    width: usize,
+    height: usize,
+    primary: &EncodedFrame,
+    alpha: Option<&EncodedFrame>,
+    options: &EncoderOptions,
+    rich_color: Option<&NativeColorInformation>,
+    native_color: Option<&NativeColorSource<'_>>,
 ) -> Result<Vec<u8>, EncoderError> {
     let _timing = Guard::new(Kind::Container);
     let width = u32::try_from(width)
@@ -48,6 +104,8 @@ pub(crate) fn write_avif(
         alpha,
         item_count,
         options,
+        rich_color,
+        native_color,
     })?
     .len();
     let primary_offset = ftyp
@@ -70,6 +128,8 @@ pub(crate) fn write_avif(
         alpha,
         item_count,
         options,
+        rich_color,
+        native_color,
     })?;
     let mut output = Vec::with_capacity(
         ftyp.len()
@@ -126,6 +186,8 @@ fn meta_box(input: &MetaBoxInput<'_>) -> Result<Vec<u8>, EncoderError> {
         input.primary,
         input.alpha,
         input.options,
+        input.rich_color,
+        input.native_color,
     )?;
     let iref = if input.alpha.is_some() {
         Some(auxiliary_reference_box()?)
@@ -205,6 +267,8 @@ fn item_properties_box(
     primary: &EncodedFrame,
     alpha: Option<&EncodedFrame>,
     options: &EncoderOptions,
+    rich_color: Option<&NativeColorInformation>,
+    native_color: Option<&NativeColorSource<'_>>,
 ) -> Result<Vec<u8>, EncoderError> {
     let primary_pixi = options
         .pixel_information
@@ -216,13 +280,24 @@ fn item_properties_box(
     validate_pixi(&primary_pixi)?;
     let ispe = image_spatial_extents(width, height)?;
     let primary_pixi_box = pixel_information_box(&primary_pixi)?;
-    let colr = color_box(options.color_information.as_ref())?;
     let primary_av1c = box_bytes(b"av1C", &primary.sequence_header)?;
     let mut ipco_payload = Vec::new();
-    ipco_payload.extend_from_slice(&ispe);
-    ipco_payload.extend_from_slice(&primary_pixi_box);
-    ipco_payload.extend_from_slice(&colr);
-    ipco_payload.extend_from_slice(&primary_av1c);
+    let mut property_count = 0u8;
+    let ispe_index = append_property(&mut ipco_payload, &ispe, &mut property_count)?;
+    let primary_pixi_index =
+        append_property(&mut ipco_payload, &primary_pixi_box, &mut property_count)?;
+    let color_indices = append_color_properties(
+        &mut ipco_payload,
+        &mut property_count,
+        options.color_information.as_ref(),
+        rich_color,
+        native_color,
+    )?;
+    let primary_av1c_index =
+        append_property(&mut ipco_payload, &primary_av1c, &mut property_count)?;
+    let mut primary_associations = vec![ispe_index, primary_pixi_index];
+    primary_associations.extend(color_indices.iter().copied());
+    primary_associations.push(primary_av1c_index);
     let mut alpha_associations = Vec::new();
     if let Some(alpha) = alpha {
         let alpha_pixi = PixelInformation {
@@ -237,16 +312,29 @@ fn item_properties_box(
             0,
             b"urn:mpeg:mpegB:cicp:systems:auxiliary:alpha\0",
         )?;
-        ipco_payload.extend_from_slice(&alpha_pixi_box);
-        ipco_payload.extend_from_slice(&alpha_av1c);
-        ipco_payload.extend_from_slice(&auxc);
-        alpha_associations.extend_from_slice(&[0x81, 0x85, 0x86, 0x87]);
+        let alpha_pixi_index =
+            append_property(&mut ipco_payload, &alpha_pixi_box, &mut property_count)?;
+        let alpha_av1c_index =
+            append_property(&mut ipco_payload, &alpha_av1c, &mut property_count)?;
+        let auxc_index = append_property(&mut ipco_payload, &auxc, &mut property_count)?;
+        alpha_associations.extend_from_slice(&[
+            essential_property_index(ispe_index),
+            essential_property_index(alpha_pixi_index),
+            essential_property_index(alpha_av1c_index),
+            essential_property_index(auxc_index),
+        ]);
     }
     let ipco = box_bytes(b"ipco", &ipco_payload)?;
     let mut ipma_payload = Vec::new();
     ipma_payload.extend_from_slice(&(if alpha.is_some() { 2u32 } else { 1u32 }).to_be_bytes());
     ipma_payload.extend_from_slice(&PRIMARY_ITEM_ID.to_be_bytes());
-    ipma_payload.extend_from_slice(&[4, 0x81, 0x82, 0x83, 0x84]);
+    ipma_payload.push(
+        u8::try_from(primary_associations.len())
+            .map_err(|_| EncoderError::InvalidParam("too many primary properties".to_string()))?,
+    );
+    for index in primary_associations {
+        ipma_payload.push(essential_property_index(index));
+    }
     if alpha.is_some() {
         ipma_payload.extend_from_slice(&ALPHA_ITEM_ID.to_be_bytes());
         ipma_payload.push(alpha_associations.len() as u8);
@@ -257,6 +345,23 @@ fn item_properties_box(
     payload.extend_from_slice(&ipco);
     payload.extend_from_slice(&ipma);
     box_bytes(b"iprp", &payload)
+}
+
+fn append_property(
+    payload: &mut Vec<u8>,
+    property: &[u8],
+    property_count: &mut u8,
+) -> Result<u8, EncoderError> {
+    let index = property_count
+        .checked_add(1)
+        .ok_or_else(|| EncoderError::InvalidParam("too many item properties".to_string()))?;
+    payload.extend_from_slice(property);
+    *property_count = index;
+    Ok(index)
+}
+
+fn essential_property_index(index: u8) -> u8 {
+    index | 0x80
 }
 
 fn image_spatial_extents(width: u32, height: u32) -> Result<Vec<u8>, EncoderError> {
@@ -281,20 +386,123 @@ fn pixel_information_box(pixi: &PixelInformation) -> Result<Vec<u8>, EncoderErro
     full_box(b"pixi", 0, 0, &payload)
 }
 
-fn color_box(color: Option<&ColorInformation>) -> Result<Vec<u8>, EncoderError> {
-    let color = color.cloned().unwrap_or_else(|| {
-        crate::NclxColorInformation {
-            color_primaries: 1,
-            transfer_characteristics: 13,
-            matrix_coefficients: 6,
-            full_range_flag: true,
+fn append_color_properties(
+    output: &mut Vec<u8>,
+    property_count: &mut u8,
+    legacy: Option<&ColorInformation>,
+    rich: Option<&NativeColorInformation>,
+    native: Option<&NativeColorSource<'_>>,
+) -> Result<Vec<u8>, EncoderError> {
+    if let Some(native) = native {
+        let mut indices = Vec::new();
+        let nclx_payload = [
+            (native.nclx.color_primaries >> 8) as u8,
+            native.nclx.color_primaries as u8,
+            (native.nclx.transfer_characteristics >> 8) as u8,
+            native.nclx.transfer_characteristics as u8,
+            (native.nclx.matrix_coefficients >> 8) as u8,
+            native.nclx.matrix_coefficients as u8,
+            if native.nclx.full_range_flag { 0x80 } else { 0 },
+        ];
+        indices.push(append_color_property(
+            output,
+            property_count,
+            *b"nclx",
+            &nclx_payload,
+        )?);
+        if let Some(profile) = native.icc_profile {
+            let color_type = native.icc_color_type.unwrap_or(*b"prof");
+            if color_type != *b"prof" && color_type != *b"rICC" {
+                return Err(EncoderError::InvalidParam(
+                    "native ICC color type must be prof or rICC".to_string(),
+                ));
+            }
+            indices.push(append_color_property(
+                output,
+                property_count,
+                color_type,
+                profile,
+            )?);
         }
-        .to_color_information()
-    });
-    let mut payload = Vec::with_capacity(4 + color.payload.len());
-    payload.extend_from_slice(&color.color_type);
-    payload.extend_from_slice(&color.payload);
-    box_bytes(b"colr", &payload)
+        return Ok(indices);
+    }
+    let Some(rich) = rich else {
+        let default_payload = [0, 1, 0, 13, 0, 6, 0x80];
+        let (color_type, color_payload) = legacy
+            .map_or((*b"nclx", &default_payload[..]), |color| {
+                (color.color_type, color.payload.as_slice())
+            });
+        return append_color_property(output, property_count, color_type, color_payload)
+            .map(|index| vec![index]);
+    };
+    let mut indices = Vec::new();
+    if let Some(nclx) = rich.nclx {
+        let nclx_payload = [
+            (nclx.color_primaries >> 8) as u8,
+            nclx.color_primaries as u8,
+            (nclx.transfer_characteristics >> 8) as u8,
+            nclx.transfer_characteristics as u8,
+            (nclx.matrix_coefficients >> 8) as u8,
+            nclx.matrix_coefficients as u8,
+            if nclx.full_range_flag { 0x80 } else { 0 },
+        ];
+        indices.push(append_color_property(
+            output,
+            property_count,
+            *b"nclx",
+            &nclx_payload,
+        )?);
+    }
+    if let Some(profile) = &rich.icc_profile {
+        let color_type = rich.icc_color_type.unwrap_or(*b"prof");
+        if color_type != *b"prof" && color_type != *b"rICC" {
+            return Err(EncoderError::InvalidParam(
+                "native ICC color type must be prof or rICC".to_string(),
+            ));
+        }
+        indices.push(append_color_property(
+            output,
+            property_count,
+            color_type,
+            profile,
+        )?);
+    }
+    if indices.is_empty() {
+        let default_payload = [0, 1, 0, 13, 0, 6, 0x80];
+        let (color_type, color_payload) = legacy
+            .map_or((*b"nclx", &default_payload[..]), |color| {
+                (color.color_type, color.payload.as_slice())
+            });
+        indices.push(append_color_property(
+            output,
+            property_count,
+            color_type,
+            color_payload,
+        )?);
+    }
+    Ok(indices)
+}
+
+fn append_color_property(
+    output: &mut Vec<u8>,
+    property_count: &mut u8,
+    color_type: [u8; 4],
+    color_payload: &[u8],
+) -> Result<u8, EncoderError> {
+    let index = property_count
+        .checked_add(1)
+        .ok_or_else(|| EncoderError::InvalidParam("too many item properties".to_string()))?;
+    let size = color_payload
+        .len()
+        .checked_add(12)
+        .and_then(|size| u32::try_from(size).ok())
+        .ok_or_else(|| EncoderError::InvalidParam("AVIF colr box exceeds u32".to_string()))?;
+    output.extend_from_slice(&size.to_be_bytes());
+    output.extend_from_slice(b"colr");
+    output.extend_from_slice(&color_type);
+    output.extend_from_slice(color_payload);
+    *property_count = index;
+    Ok(index)
 }
 
 fn box_bytes(kind: &[u8; 4], payload: &[u8]) -> Result<Vec<u8>, EncoderError> {

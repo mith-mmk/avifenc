@@ -4,14 +4,22 @@ use rav1e::prelude::{
     SegmentationLevel, TransferCharacteristics, Tune,
 };
 
+use crate::backend_capabilities::{validate_lossless_controls, validate_native_pixi_extensions};
 use crate::compat::{DataMap, EncodeOptions, EncoderOptions, Metadata, PickOptions};
-use crate::container::write_avif;
+use crate::container::{NativeColorSource, write_avif, write_avif_with_native_color_source};
 use crate::error::EncoderError;
 use crate::lossless_backend::encode_still_lossless;
 use crate::lossless_types::LosslessPlanes;
+use crate::native_color_plan::{
+    NativeColorPlan, checked_native_color_plan, native_nclx_color_information,
+};
+use crate::native_plan::validate_native_plane;
 use crate::profile;
 use crate::profile::{Guard, Kind};
-use crate::{FrameBuffers, ImageBuffer, PixelInformation, PlaneBuffer, Rgba16ImageBuffer};
+use crate::{
+    FrameBuffers, ImageBuffer, NativeColorInformation, PixelInformation, PlaneBuffer,
+    Rgba16ImageBuffer,
+};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Sampling {
@@ -19,6 +27,55 @@ enum Sampling {
     Cs420,
     Cs422,
     Cs444,
+}
+
+/// Explicit chroma layout for native encoding.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NativeSubsampling {
+    /// Monochrome (4:0:0).
+    Cs400,
+    /// 4:2:0.
+    Cs420,
+    /// 4:2:2.
+    Cs422,
+    /// 4:4:4.
+    Cs444,
+}
+
+impl NativeSubsampling {
+    fn sampling(self) -> Sampling {
+        match self {
+            Self::Cs400 => Sampling::Cs400,
+            Self::Cs420 => Sampling::Cs420,
+            Self::Cs422 => Sampling::Cs422,
+            Self::Cs444 => Sampling::Cs444,
+        }
+    }
+}
+
+/// Options for explicit native 8/10/12-bit AVIF encoding.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NativeEncodeOptions {
+    /// Explicit coded sample depth. Zero is invalid and forces the caller to
+    /// choose 8, 10, or 12 bits instead of inferring from sample maxima.
+    pub bit_depth: u8,
+    /// Explicit native chroma layout.
+    pub subsampling: NativeSubsampling,
+    /// Backend quality and execution controls.
+    pub encoder: EncoderOptions,
+    /// Both ICC and CICP source metadata may be retained.
+    pub color_information: NativeColorInformation,
+}
+
+impl Default for NativeEncodeOptions {
+    fn default() -> Self {
+        Self {
+            bit_depth: 0,
+            subsampling: NativeSubsampling::Cs444,
+            encoder: EncoderOptions::default(),
+            color_information: NativeColorInformation::default(),
+        }
+    }
 }
 
 struct PlaneInput<'a> {
@@ -31,6 +88,71 @@ pub(crate) struct EncodedFrame {
     pub sequence_header: Vec<u8>,
     pub frame_payload: Vec<u8>,
     pub pixel_channels: u8,
+}
+
+#[cfg(test)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum NativeBackendKind {
+    Primary,
+    Alpha,
+}
+
+#[cfg(test)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct NativeBackendEntries {
+    primary: u8,
+    alpha: u8,
+    order: [NativeBackendKind; 2],
+    order_len: usize,
+}
+
+#[cfg(test)]
+impl Default for NativeBackendEntries {
+    fn default() -> Self {
+        Self {
+            primary: 0,
+            alpha: 0,
+            order: [NativeBackendKind::Primary; 2],
+            order_len: 0,
+        }
+    }
+}
+
+#[cfg(test)]
+thread_local! {
+    static NATIVE_BACKEND_ENTRIES: std::cell::Cell<NativeBackendEntries> =
+        const { std::cell::Cell::new(NativeBackendEntries {
+            primary: 0,
+            alpha: 0,
+            order: [NativeBackendKind::Primary; 2],
+            order_len: 0,
+        }) };
+}
+
+#[cfg(test)]
+fn reset_native_backend_entries() {
+    NATIVE_BACKEND_ENTRIES.with(|entries| entries.set(NativeBackendEntries::default()));
+}
+
+#[cfg(test)]
+fn native_backend_entries() -> NativeBackendEntries {
+    NATIVE_BACKEND_ENTRIES.with(std::cell::Cell::get)
+}
+
+#[cfg(test)]
+fn record_native_backend_entry(kind: NativeBackendKind) {
+    NATIVE_BACKEND_ENTRIES.with(|entries| {
+        let mut current = entries.get();
+        match kind {
+            NativeBackendKind::Primary => current.primary = current.primary.saturating_add(1),
+            NativeBackendKind::Alpha => current.alpha = current.alpha.saturating_add(1),
+        }
+        if current.order_len < current.order.len() {
+            current.order[current.order_len] = kind;
+            current.order_len += 1;
+        }
+        entries.set(current);
+    });
 }
 
 /// Encodes one image supplied by a `PickCallback`.
@@ -177,6 +299,242 @@ pub fn encode_frame_bytes(
     )?;
     let effective = effective_options(options, buffers.planes.len(), bit_depth);
     write_avif(buffers.width, buffers.height, &primary, None, &effective)
+}
+
+/// Encodes explicit native planes with validated depth, chroma layout, alpha,
+/// and colour metadata.
+pub fn encode_native_bytes(
+    buffers: &FrameBuffers,
+    options: &NativeEncodeOptions,
+) -> Result<Vec<u8>, EncoderError> {
+    validate_dimensions(buffers.width, buffers.height)?;
+    if !matches!(options.bit_depth, 8 | 10 | 12) {
+        return Err(EncoderError::InvalidParam(
+            "native AVIF encoding requires an explicit 8, 10, or 12-bit depth".to_string(),
+        ));
+    }
+    validate_options(&options.encoder)?;
+    let sampling = options.subsampling.sampling();
+    let color_channels = if sampling == Sampling::Cs400 { 1 } else { 3 };
+    let color_plan = checked_native_color_plan(
+        &options.color_information,
+        options.encoder.color_information.as_ref(),
+        sampling == Sampling::Cs400,
+        match sampling {
+            Sampling::Cs400 | Sampling::Cs444 => (0, 0),
+            Sampling::Cs420 => (1, 1),
+            Sampling::Cs422 => (1, 0),
+        },
+    )?;
+    if buffers.planes.len() != color_channels && buffers.planes.len() != color_channels + 1 {
+        return Err(EncoderError::InvalidParam(format!(
+            "native AVIF requires {color_channels} color planes plus optional alpha"
+        )));
+    }
+    let expected_subsampling = match sampling {
+        Sampling::Cs400 | Sampling::Cs444 => (0, 0),
+        Sampling::Cs420 => (1, 1),
+        Sampling::Cs422 => (1, 0),
+    };
+    let mut color_planes = Vec::with_capacity(color_channels);
+    for (index, plane) in buffers.planes.iter().take(color_channels).enumerate() {
+        let expected_width = if index == 0 {
+            buffers.width
+        } else {
+            buffers.width.div_ceil(1usize << expected_subsampling.0)
+        };
+        let expected_height = if index == 0 {
+            buffers.height
+        } else {
+            buffers.height.div_ceil(1usize << expected_subsampling.1)
+        };
+        validate_native_plane(
+            plane,
+            index as u8,
+            expected_width,
+            expected_height,
+            if index == 0 {
+                (0, 0)
+            } else {
+                expected_subsampling
+            },
+            options.bit_depth,
+        )?;
+        color_planes.push(PlaneInput {
+            samples: &plane.samples,
+            width: expected_width,
+            height: expected_height,
+        });
+    }
+    let alpha = if buffers.planes.len() == color_channels + 1 {
+        let plane = &buffers.planes[color_channels];
+        validate_native_plane(
+            plane,
+            3,
+            buffers.width,
+            buffers.height,
+            (0, 0),
+            options.bit_depth,
+        )?;
+        Some(plane.samples.as_slice())
+    } else {
+        None
+    };
+
+    let mut effective = native_backend_options(options, color_plan);
+    if effective.pixel_information.is_none() {
+        effective.pixel_information = Some(PixelInformation {
+            bits_per_channel: vec![options.bit_depth; color_channels],
+            extended_channels: None,
+        });
+    }
+    validate_pixel_information(&effective, color_channels, Some(options.bit_depth))?;
+    let primary_lossless = color_lossless_requested(&effective);
+    let alpha_lossless = alpha.is_some() && alpha_lossless_requested(&effective);
+    if primary_lossless {
+        validate_lossless_controls(&effective, "native primary")?;
+    }
+    if alpha_lossless {
+        validate_lossless_controls(&effective, "native alpha")?;
+    }
+    validate_native_pixi_extensions(effective.pixel_information.as_ref(), "native")?;
+    #[cfg(test)]
+    record_native_backend_entry(NativeBackendKind::Primary);
+    let primary = if primary_lossless {
+        encode_native_lossless_frame(
+            buffers.width,
+            buffers.height,
+            &color_planes,
+            sampling,
+            options.bit_depth,
+            &color_plan,
+            effective.speed,
+        )?
+    } else {
+        encode_planes(
+            buffers.width,
+            buffers.height,
+            &color_planes,
+            sampling,
+            options.bit_depth,
+            &effective,
+        )?
+    };
+    let primary = native_container_frame(primary, sampling);
+    let alpha_frame = alpha
+        .map(|samples| {
+            let alpha_options = NativeEncodeOptions {
+                bit_depth: options.bit_depth,
+                subsampling: NativeSubsampling::Cs400,
+                encoder: EncoderOptions {
+                    quality: effective.quality_alpha,
+                    quality_alpha: effective.quality_alpha,
+                    color_information: None,
+                    pixel_information: Some(PixelInformation {
+                        bits_per_channel: vec![options.bit_depth],
+                        extended_channels: None,
+                    }),
+                    ..effective.clone()
+                },
+                color_information: NativeColorInformation::default(),
+            };
+            #[cfg(test)]
+            record_native_backend_entry(NativeBackendKind::Alpha);
+            let frame = if color_lossless_requested(&alpha_options.encoder) {
+                let alpha_color = NativeColorInformation::from_nclx(crate::NclxColorInformation {
+                    color_primaries: 1,
+                    transfer_characteristics: 13,
+                    matrix_coefficients: 6,
+                    full_range_flag: true,
+                });
+                let alpha_plan = checked_native_color_plan(&alpha_color, None, true, (0, 0))?;
+                encode_native_lossless_frame(
+                    buffers.width,
+                    buffers.height,
+                    &[PlaneInput {
+                        samples,
+                        width: buffers.width,
+                        height: buffers.height,
+                    }],
+                    Sampling::Cs400,
+                    options.bit_depth,
+                    &alpha_plan,
+                    alpha_options.encoder.speed,
+                )
+            } else {
+                encode_planes(
+                    buffers.width,
+                    buffers.height,
+                    &[PlaneInput {
+                        samples,
+                        width: buffers.width,
+                        height: buffers.height,
+                    }],
+                    Sampling::Cs400,
+                    options.bit_depth,
+                    &alpha_options.encoder,
+                )
+            }?;
+            Ok::<_, EncoderError>(native_container_frame(frame, Sampling::Cs400))
+        })
+        .transpose()?;
+    let native_color = NativeColorSource {
+        nclx: color_plan.nclx,
+        icc_profile: color_plan.icc_profile,
+        icc_color_type: color_plan.icc_color_type,
+    };
+    write_avif_with_native_color_source(
+        buffers.width,
+        buffers.height,
+        &primary,
+        alpha_frame.as_ref(),
+        &effective,
+        &native_color,
+    )
+}
+
+fn native_container_frame(mut frame: EncodedFrame, sampling: Sampling) -> EncodedFrame {
+    if sampling == Sampling::Cs400 && frame.sequence_header.len() >= 3 {
+        // AV1's monochrome color_config infers both chroma subsampling flags
+        // as one.  rav1e's compact container header may retain the luma-plane
+        // layout (1,0) in lossy mode; the native API must make av1C agree with
+        // the actual sequence header without changing the supplied plane.
+        frame.sequence_header[2] |= 0x0c;
+    }
+    frame
+}
+
+fn encode_native_lossless_frame(
+    width: usize,
+    height: usize,
+    planes: &[PlaneInput<'_>],
+    sampling: Sampling,
+    bit_depth: u8,
+    color: &NativeColorPlan<'_>,
+    speed: u8,
+) -> Result<EncodedFrame, EncoderError> {
+    let nclx = color.nclx;
+    let plane_refs = planes.iter().map(|plane| plane.samples).collect();
+    let lossless = LosslessPlanes {
+        width: u32::try_from(width)
+            .map_err(|_| EncoderError::InvalidParam("image width exceeds u32".to_string()))?,
+        height: u32::try_from(height)
+            .map_err(|_| EncoderError::InvalidParam("image height exceeds u32".to_string()))?,
+        bit_depth,
+        monochrome: sampling == Sampling::Cs400,
+        subsampling_x: if matches!(sampling, Sampling::Cs420 | Sampling::Cs422) {
+            1
+        } else {
+            0
+        },
+        subsampling_y: if sampling == Sampling::Cs420 { 1 } else { 0 },
+        color_primaries: nclx.color_primaries,
+        transfer_characteristics: nclx.transfer_characteristics,
+        matrix_coefficients: nclx.matrix_coefficients,
+        full_range: nclx.full_range_flag,
+        planes: plane_refs,
+    };
+    encode_lossless_plane_set(&lossless, speed)
 }
 
 /// Encodes an RGBA16 image as a native 12-bit 4:2:0 image by default.
@@ -705,15 +1063,7 @@ fn validate_lossless_options(
     bit_depth: u8,
     input_kind: &str,
 ) -> Result<(), EncoderError> {
-    if options.jobs != 0
-        || options.tile_rows_log2 != 0
-        || options.tile_cols_log2 != 0
-        || !options.advanced.is_empty()
-    {
-        return Err(EncoderError::Unsupported(format!(
-            "the lossless {input_kind} backend does not expose jobs, tiling, or advanced controls"
-        )));
-    }
+    validate_lossless_controls(options, input_kind)?;
     if let Some(pixi) = &options.pixel_information
         && (pixi.bits_per_channel.len() != channels
             || pixi.bits_per_channel.iter().any(|&bits| bits != bit_depth)
@@ -1373,6 +1723,27 @@ fn effective_options(options: &EncoderOptions, channels: usize, bit_depth: u8) -
         });
     }
     effective
+}
+
+fn native_backend_options(
+    options: &NativeEncodeOptions,
+    color_plan: NativeColorPlan<'_>,
+) -> EncoderOptions {
+    // Do not clone the caller's nested color property: native color metadata is
+    // authoritative and is carried by the borrowed plan into the container
+    // writer.  In particular, an opaque ICC payload can be several kilobytes.
+    EncoderOptions {
+        quality: options.encoder.quality,
+        quality_alpha: options.encoder.quality_alpha,
+        speed: options.encoder.speed,
+        lossless: options.encoder.lossless,
+        jobs: options.encoder.jobs,
+        tile_rows_log2: options.encoder.tile_rows_log2,
+        tile_cols_log2: options.encoder.tile_cols_log2,
+        advanced: options.encoder.advanced.clone(),
+        color_information: Some(native_nclx_color_information(color_plan)),
+        pixel_information: options.encoder.pixel_information.clone(),
+    }
 }
 
 fn effective_image_options(
@@ -2121,3 +2492,7 @@ mod tests {
         assert!(!config.speed_settings.transform.tx_domain_distortion);
     }
 }
+
+#[cfg(test)]
+#[path = "encoder_backend_tests.rs"]
+mod backend_tests;

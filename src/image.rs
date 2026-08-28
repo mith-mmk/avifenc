@@ -23,7 +23,10 @@ pub struct Rgba16ImageBuffer {
 /// Native AV1 plane geometry compatible with `avif-rust`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PlaneLayout {
-    /// AV1 plane index: 0 for Y or gray, 1 for U, and 2 for V.
+    /// AV1 plane index: 0 for Y or gray, 1 for U, and 2 for V in the legacy
+    /// native frame API. `encode_native_bytes` also accepts plane 3 as an
+    /// optional alpha plane and uses 0=G, 1=B, 2=R for the native identity
+    /// layout.
     pub plane: u8,
     /// Plane width in samples.
     pub width: usize,
@@ -60,7 +63,9 @@ pub struct FrameBuffers {
     pub width: usize,
     /// Luma frame height in pixels.
     pub height: usize,
-    /// One gray/luma plane or three YUV planes.
+    /// One gray/luma plane or three YUV planes for the legacy native frame
+    /// API. `encode_native_bytes` additionally accepts an optional plane 3
+    /// alpha buffer and its explicit native identity GBR layout.
     pub planes: Vec<PlaneBuffer>,
 }
 
@@ -137,6 +142,56 @@ pub struct NclxColorInformation {
     pub matrix_coefficients: u16,
     /// Whether the encoded samples use full range.
     pub full_range_flag: bool,
+}
+
+/// Colour properties to preserve on a native AVIF item.
+///
+/// Native encoding requires an explicit [`NativeColorInformation::nclx`]
+/// tuple. ICC is opaque to this codec and is never interpreted or replaced by
+/// an implicit sRGB profile; CICP and ICC may be emitted together. If ICC is
+/// supplied, `icc_profile` and `icc_color_type` must be supplied as a pair,
+/// with the type set to `prof` or `rICC`. Native CICP is authoritative. A
+/// nested [`EncoderOptions`](crate::EncoderOptions) `ColorInformation` contains
+/// one `colr` property, so it must match the native CICP property exactly when
+/// it is `nclx`, or match the native ICC type and bytes when it is `prof`/`rICC`;
+/// it cannot represent both properties at once.
+///
+/// The native writer currently emits the primary item followed by an
+/// optional alpha auxiliary item. The alpha item has its own monochrome,
+/// full-range CICP description and no ICC/`colr`; callers should not use the
+/// primary identity tuple as an alpha description. Identity CICP is admitted
+/// only for the explicit full-range BT.709/sRGB 4:4:4 GBR layout, with the
+/// AV1-required GBR plane order (`plane 0 = G`, `plane 1 = B`, `plane 2 = R`).
+/// Other identity tuples, including monochrome, are rejected by the native
+/// policy. Auxiliary item identifiers are container-owned.
+/// `PlaneLayout::plane == 3` identifies an input alpha plane; it is not a
+/// promise that the container will use item ID 3 (the current writer uses
+/// item 2).
+///
+/// `NativeEncodeOptions::default` retains the legacy nested colour default.
+/// When supplying a different native tuple, callers should set
+/// `EncoderOptions::color_information` to `None`, or provide an exactly
+/// matching nested `nclx`/ICC property.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct NativeColorInformation {
+    /// Explicit CICP `nclx` property required by native encoding. ICC cannot
+    /// infer this AV1 colour configuration.
+    pub nclx: Option<NclxColorInformation>,
+    /// Raw ICC profile bytes. Must be paired with [`Self::icc_color_type`].
+    pub icc_profile: Option<Vec<u8>>,
+    /// ICC property type, either `prof` or `rICC`; must be paired with
+    /// [`Self::icc_profile`].
+    pub icc_color_type: Option<[u8; 4]>,
+}
+
+impl NativeColorInformation {
+    /// Constructs CICP-only native colour information.
+    pub fn from_nclx(nclx: NclxColorInformation) -> Self {
+        Self {
+            nclx: Some(nclx),
+            ..Self::default()
+        }
+    }
 }
 
 impl NclxColorInformation {

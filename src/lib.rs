@@ -5,6 +5,7 @@
 //! `encode`/`encode_bytes` entry points are kept stable and explicit.
 #![deny(missing_docs)]
 
+mod backend_capabilities;
 mod compat;
 mod container;
 mod encoder;
@@ -15,6 +16,8 @@ mod lossless_cdf;
 mod lossless_headers;
 mod lossless_tile;
 mod lossless_types;
+mod native_color_plan;
+mod native_plan;
 mod profile;
 
 pub use compat::{
@@ -23,8 +26,12 @@ pub use compat::{
 };
 pub use error::EncoderError;
 pub use image::{
-    ColorInformation, FrameBuffers, ImageBuffer, NclxColorInformation, PixelChannelInformation,
-    PixelInformation, PixelSubsampling, PlaneBuffer, PlaneLayout, Rgba16ImageBuffer,
+    ColorInformation, FrameBuffers, ImageBuffer, NativeColorInformation, NclxColorInformation,
+    PixelChannelInformation, PixelInformation, PixelSubsampling, PlaneBuffer, PlaneLayout,
+    Rgba16ImageBuffer,
 };
 
-pub use encoder::{encode, encode_bytes, encode_frame_bytes, encode_rgba16_bytes};
+pub use encoder::{
+    NativeEncodeOptions, NativeSubsampling, encode, encode_bytes, encode_frame_bytes,
+    encode_native_bytes, encode_rgba16_bytes,
+};
