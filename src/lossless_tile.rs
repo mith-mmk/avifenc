@@ -3377,23 +3377,30 @@ impl<'a> FrameEncoder<'a> {
     }
 
     fn cfl_luma_deltas(&self, block_sx: usize, block_sy: usize) -> [i32; 16] {
-        let sample_count = 1usize << (self.subsampling_x + self.subsampling_y);
         let luma_x = block_sx << self.subsampling_x;
         let luma_y = block_sy << self.subsampling_y;
+        let luma_sample_width = 1usize << self.subsampling_x;
+        let luma_sample_height = 1usize << self.subsampling_y;
+        // CfL is limited to 4x4 chroma blocks here; their luma coding unit is
+        // reconstructed first and the requested footprint stays inside it.
+        // Coded dimensions bound backing storage at frame edges; they are not
+        // generic AV1 per-transform MaxLumaW/MaxLumaH.
+        let max_luma_x = self.plane_coded_widths[0].saturating_sub(luma_sample_width);
+        let max_luma_y = self.plane_coded_heights[0].saturating_sub(luma_sample_height);
         let luma_q3_at = |row: usize, col: usize| {
-            let source_x = (luma_x + (col << self.subsampling_x)).min(self.plane_widths[0] - 1);
-            let source_y = (luma_y + (row << self.subsampling_y)).min(self.plane_heights[0] - 1);
+            // AV1 §7.11.5 keeps the subsampled luma sum at Q3 precision.  Do
+            // not round the sum to an integer luma sample before scaling it,
+            // since that loses the fractional precision at 4:2:0 edges.
+            let source_x = (luma_x + (col << self.subsampling_x)).min(max_luma_x);
+            let source_y = (luma_y + (row << self.subsampling_y)).min(max_luma_y);
             let mut sum = 0u32;
-            for luma_row in 0..(1usize << self.subsampling_y) {
-                for luma_col in 0..(1usize << self.subsampling_x) {
-                    sum += self.reconstructed_sample(
-                        0,
-                        (source_x + luma_col).min(self.plane_widths[0] - 1),
-                        (source_y + luma_row).min(self.plane_heights[0] - 1),
-                    ) as u32;
+            for luma_row in 0..luma_sample_height {
+                for luma_col in 0..luma_sample_width {
+                    sum += self.reconstructed_sample(0, source_x + luma_col, source_y + luma_row)
+                        as u32;
                 }
             }
-            ((sum + (sample_count as u32 / 2)) / sample_count as u32) as i32 * 8
+            (sum << (3 - self.subsampling_x - self.subsampling_y)) as i32
         };
         let average_q3 = ((0..4)
             .flat_map(|row| (0..4).map(move |col| luma_q3_at(row, col)))
@@ -5247,3 +5254,7 @@ mod tests {
         }
     }
 }
+
+#[cfg(test)]
+#[path = "lossless_tile_cfl_tests.rs"]
+mod cfl_regression_tests;
