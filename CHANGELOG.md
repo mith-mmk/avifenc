@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.0.7 - 2026-08-31
+
+### Changed
+
+- Prepared the typed U8/U16 8/10/12-bit input path for WML2 high-bit-depth
+  integration without inferring output depth or treating U16 as a 16-bit AV1
+  stream.
+- Kept explicit quantization and ICC/nclx metadata replacement separate from
+  pixel conversion.
+
 ## 0.0.6 - 2026-08-07
 
 - Added a Pure Rust AVIF still-image encoder backed by `rav1e`.

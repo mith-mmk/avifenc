@@ -4,6 +4,7 @@
 # avifenc-rust
 
 Pure Rust AVIF still-image encoding backed by the Rust `rav1e` AV1 encoder.
+The current release candidate is `avifenc-rust 0.0.7`.
 
 The public vocabulary follows `avif-rust`: use `ImageBuffer` and
 `Rgba16ImageBuffer` for RGBA input, `FrameBuffers` for native YUV input,
