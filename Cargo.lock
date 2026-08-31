@@ -100,7 +100,7 @@ dependencies = [
 
 [[package]]
 name = "avifenc-rust"
-version = "0.0.6"
+version = "0.0.7"
 dependencies = [
  "gamut-bitstream",
  "gamut-core 0.1.0",
