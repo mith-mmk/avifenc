@@ -1,7 +1,7 @@
 # Shared-buffer encode integration
 
-`avifenc_rust::buffer` reexports the unpublished `avif-image-buffer` package
-from avif-rust Git commit `9ed4ad242582c3375c8d8ee1365ef7d6ddc5b53a`.
+`avifenc_rust::buffer` reexports the initial `avif-image-buffer` package (0.1.0 candidate, not yet published)
+from avif-rust Git commit `05eec504cb9edc68bee99b47b83ef9796b45ec97`.
 This selects the buffer package only, not the decoder crate. The encoder must
 not depend on avif-rust: optional avif encode delegation points in this direction.
 No package/repository publication is included.
@@ -48,3 +48,23 @@ WASM and isolated performance are verified at the subsequent avif integration
 checkpoint, not claimed by these encoder-only pass counts.
 
 WML2 PR13, JPEG2000, release/version numbers and codec defaults are unchanged.
+
+
+Packaging follow-up: this branch prepares avifenc-rust 0.0.8, since 0.0.7
+is already published without the shared API. The shared dependency includes
+`version = "0.1.0"` alongside the immutable Git revision. Cargo removes Git
+coordinates from the packaged manifest and resolves that version from crates.io.
+Do not mix a registry decoder and Git encoder without a consistent top-level
+shared-package patch: the two sources have distinct Rust type identities.
+
+The required publication order is avif-image-buffer 0.1.0, avifenc-rust 0.0.8,
+then avif-rust 0.0.9. No package was uploaded, no credentials were created and
+no release/tag was published. A real registry package verification of this crate
+requires the shared package to be published first; Git tests do not establish
+that registry publication has happened.
+
+Local packaging verification passed using the already packaged shared 0.1.0
+archive through a command-scoped crates.io path patch. The resulting encoder
+archive was built by Cargo after normalization. This is a local artifact check,
+not a successful crates.io dependency resolution or publication. The normal
+registry package command still rejects the unpublished shared dependency.
