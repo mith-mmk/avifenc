@@ -254,9 +254,9 @@ fn append_item_location(payload: &mut Vec<u8>, item_id: u16, offset: u32, length
 
 fn auxiliary_reference_box() -> Result<Vec<u8>, EncoderError> {
     let mut reference_payload = Vec::new();
-    reference_payload.extend_from_slice(&PRIMARY_ITEM_ID.to_be_bytes());
-    reference_payload.extend_from_slice(&1u16.to_be_bytes());
     reference_payload.extend_from_slice(&ALPHA_ITEM_ID.to_be_bytes());
+    reference_payload.extend_from_slice(&1u16.to_be_bytes());
+    reference_payload.extend_from_slice(&PRIMARY_ITEM_ID.to_be_bytes());
     let reference = box_bytes(b"auxl", &reference_payload)?;
     full_box(b"iref", 0, 0, &reference)
 }

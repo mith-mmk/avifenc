@@ -303,6 +303,45 @@ pub fn encode_frame_bytes(
 
 /// Encodes explicit native planes with validated depth, chroma layout, alpha,
 /// and colour metadata.
+pub(crate) fn validate_shared_native_options(
+    width: usize,
+    height: usize,
+    color_channels: usize,
+    has_alpha: bool,
+    options: &NativeEncodeOptions,
+) -> Result<(), EncoderError> {
+    validate_dimensions(width, height)?;
+    validate_options(&options.encoder)?;
+    if !matches!(options.bit_depth, 8 | 10 | 12) {
+        return Err(EncoderError::InvalidParam(
+            "native AVIF encoding requires8/10/12 bits".into(),
+        ));
+    }
+    let subsampling = match options.subsampling {
+        NativeSubsampling::Cs400 | NativeSubsampling::Cs444 => (0, 0),
+        NativeSubsampling::Cs420 => (1, 1),
+        NativeSubsampling::Cs422 => (1, 0),
+    };
+    let plan = checked_native_color_plan(
+        &options.color_information,
+        options.encoder.color_information.as_ref(),
+        color_channels == 1,
+        subsampling,
+    )?;
+    let effective = native_backend_options(options, plan);
+    validate_pixel_information(&effective, color_channels, Some(options.bit_depth))?;
+    validate_native_pixi_extensions(effective.pixel_information.as_ref(), "shared")?;
+    if color_lossless_requested(&effective) {
+        validate_lossless_controls(&effective, "shared primary")?;
+    }
+    if has_alpha && alpha_lossless_requested(&effective) {
+        validate_lossless_controls(&effective, "shared alpha")?;
+    }
+    Ok(())
+}
+
+/// Encodes explicit native planes with validated depth, chroma layout, alpha,
+/// and colour metadata.
 pub fn encode_native_bytes(
     buffers: &FrameBuffers,
     options: &NativeEncodeOptions,

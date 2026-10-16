@@ -15,6 +15,7 @@ multithread = ["rav1e/threading"]
 profile = []
 
 [dependencies]
+avif-image-buffer = { git = "https://github.com/mith-mmk/avif-rust.git", rev = "9ed4ad242582c3375c8d8ee1365ef7d6ddc5b53a" }
 gamut-bitstream = "=0.2.1"
 gamut-core = "=0.1.0"
 gamut-dsp = "=0.2.1"

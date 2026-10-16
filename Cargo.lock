@@ -99,9 +99,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "avif-image-buffer"
+version = "0.1.0"
+source = "git+https://github.com/mith-mmk/avif-rust.git?rev=9ed4ad242582c3375c8d8ee1365ef7d6ddc5b53a#9ed4ad242582c3375c8d8ee1365ef7d6ddc5b53a"
+
+[[package]]
 name = "avifenc-rust"
 version = "0.0.7"
 dependencies = [
+ "avif-image-buffer",
  "gamut-bitstream",
  "gamut-core 0.1.0",
  "gamut-dsp",
