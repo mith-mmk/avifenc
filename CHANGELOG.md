@@ -1,6 +1,6 @@
 # Changelog
 
-## 0.0.8 - Unreleased
+## 0.1.0 - Unreleased
 
 - Add shared image-buffer views and explicit precision/color encode preflight.
 - Correct alpha auxiliary references to point from alpha to primary.
