@@ -68,3 +68,15 @@ archive through a command-scoped crates.io path patch. The resulting encoder
 archive was built by Cargo after normalization. This is a local artifact check,
 not a successful crates.io dependency resolution or publication. The normal
 registry package command still rejects the unpublished shared dependency.
+
+## Backend validation before sample copies
+
+Shared preflight and native encode use the same backend validation helpers.
+The rav1e configuration builder applies advanced values, types and cross-option
+constraints and calls its pure configuration validator before any context or
+frame is created. The lossless path uses its existing level table for width,
+height and picture size. Primary and alpha backend choices are checked
+independently; the lossless level limit is not imposed on lossy-only images.
+Invalid settings now fail before adapter sample copies. Unit tests count sample
+copies and backend entries to verify this ordering, in addition to testing
+advanced-option failures, valid tunes and backend dimension boundaries.

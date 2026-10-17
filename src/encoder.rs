@@ -130,13 +130,19 @@ thread_local! {
 }
 
 #[cfg(test)]
-fn reset_native_backend_entries() {
+pub(crate) fn reset_native_backend_entries() {
     NATIVE_BACKEND_ENTRIES.with(|entries| entries.set(NativeBackendEntries::default()));
 }
 
 #[cfg(test)]
 fn native_backend_entries() -> NativeBackendEntries {
     NATIVE_BACKEND_ENTRIES.with(std::cell::Cell::get)
+}
+
+#[cfg(test)]
+pub(crate) fn native_backend_entry_count() -> usize {
+    let entries = native_backend_entries();
+    usize::from(entries.primary) + usize::from(entries.alpha)
 }
 
 #[cfg(test)]
@@ -331,12 +337,14 @@ pub(crate) fn validate_shared_native_options(
     let effective = native_backend_options(options, plan);
     validate_pixel_information(&effective, color_channels, Some(options.bit_depth))?;
     validate_native_pixi_extensions(effective.pixel_information.as_ref(), "shared")?;
-    if color_lossless_requested(&effective) {
-        validate_lossless_controls(&effective, "shared primary")?;
-    }
-    if has_alpha && alpha_lossless_requested(&effective) {
-        validate_lossless_controls(&effective, "shared alpha")?;
-    }
+    validate_native_backend_settings(
+        width,
+        height,
+        options.subsampling.sampling(),
+        options.bit_depth,
+        has_alpha,
+        &effective,
+    )?;
     Ok(())
 }
 
@@ -429,13 +437,14 @@ pub fn encode_native_bytes(
     }
     validate_pixel_information(&effective, color_channels, Some(options.bit_depth))?;
     let primary_lossless = color_lossless_requested(&effective);
-    let alpha_lossless = alpha.is_some() && alpha_lossless_requested(&effective);
-    if primary_lossless {
-        validate_lossless_controls(&effective, "native primary")?;
-    }
-    if alpha_lossless {
-        validate_lossless_controls(&effective, "native alpha")?;
-    }
+    validate_native_backend_settings(
+        buffers.width,
+        buffers.height,
+        sampling,
+        options.bit_depth,
+        alpha.is_some(),
+        &effective,
+    )?;
     validate_native_pixi_extensions(effective.pixel_information.as_ref(), "native")?;
     #[cfg(test)]
     record_native_backend_entry(NativeBackendKind::Primary);
@@ -462,24 +471,10 @@ pub fn encode_native_bytes(
     let primary = native_container_frame(primary, sampling);
     let alpha_frame = alpha
         .map(|samples| {
-            let alpha_options = NativeEncodeOptions {
-                bit_depth: options.bit_depth,
-                subsampling: NativeSubsampling::Cs400,
-                encoder: EncoderOptions {
-                    quality: effective.quality_alpha,
-                    quality_alpha: effective.quality_alpha,
-                    color_information: None,
-                    pixel_information: Some(PixelInformation {
-                        bits_per_channel: vec![options.bit_depth],
-                        extended_channels: None,
-                    }),
-                    ..effective.clone()
-                },
-                color_information: NativeColorInformation::default(),
-            };
+            let alpha_options = native_alpha_backend_options(&effective, options.bit_depth);
             #[cfg(test)]
             record_native_backend_entry(NativeBackendKind::Alpha);
-            let frame = if color_lossless_requested(&alpha_options.encoder) {
+            let frame = if color_lossless_requested(&alpha_options) {
                 let alpha_color = NativeColorInformation::from_nclx(crate::NclxColorInformation {
                     color_primaries: 1,
                     transfer_characteristics: 13,
@@ -498,7 +493,7 @@ pub fn encode_native_bytes(
                     Sampling::Cs400,
                     options.bit_depth,
                     &alpha_plan,
-                    alpha_options.encoder.speed,
+                    alpha_options.speed,
                 )
             } else {
                 encode_planes(
@@ -511,7 +506,7 @@ pub fn encode_native_bytes(
                     }],
                     Sampling::Cs400,
                     options.bit_depth,
-                    &alpha_options.encoder,
+                    &alpha_options,
                 )
             }?;
             Ok::<_, EncoderError>(native_container_frame(frame, Sampling::Cs400))
@@ -552,13 +547,12 @@ fn encode_native_lossless_frame(
     color: &NativeColorPlan<'_>,
     speed: u8,
 ) -> Result<EncodedFrame, EncoderError> {
+    let (width, height) = validate_lossless_dimensions(width, height)?;
     let nclx = color.nclx;
     let plane_refs = planes.iter().map(|plane| plane.samples).collect();
     let lossless = LosslessPlanes {
-        width: u32::try_from(width)
-            .map_err(|_| EncoderError::InvalidParam("image width exceeds u32".to_string()))?,
-        height: u32::try_from(height)
-            .map_err(|_| EncoderError::InvalidParam("image height exceeds u32".to_string()))?,
+        width,
+        height,
         bit_depth,
         monochrome: sampling == Sampling::Cs400,
         subsampling_x: if matches!(sampling, Sampling::Cs420 | Sampling::Cs422) {
@@ -812,12 +806,6 @@ fn encode_planes_with_prediction(
     complete_keyframe_search: bool,
 ) -> Result<EncodedFrame, EncoderError> {
     let _timing = Guard::new(Kind::Rav1eEncode);
-    let chroma_sampling = match sampling {
-        Sampling::Cs400 => ChromaSampling::Cs400,
-        Sampling::Cs420 => ChromaSampling::Cs420,
-        Sampling::Cs422 => ChromaSampling::Cs422,
-        Sampling::Cs444 => ChromaSampling::Cs444,
-    };
     if planes.len() != if sampling == Sampling::Cs400 { 1 } else { 3 } {
         return Err(EncoderError::InvalidParam(
             "plane count does not match chroma sampling".to_string(),
@@ -857,30 +845,14 @@ fn encode_planes_with_prediction(
         }
     }
 
-    let mut config = Rav1eEncoderConfig::with_speed_preset(options.speed);
-    config.width = width;
-    config.height = height;
-    config.bit_depth = usize::from(bit_depth);
-    config.chroma_sampling = chroma_sampling;
-    config.pixel_range = pixel_range(options);
-    config.color_description = color_description(options);
-    config.time_base = Rational::new(1, 1);
-    config.still_picture = true;
-    config.quantizer = quality_to_quantizer_for_options(options.quality, options.speed);
-    config.min_quantizer = config.quantizer as u8;
-    config.set_key_frame_interval(1, 1);
-    config.tile_cols = 1usize << options.tile_cols_log2;
-    config.tile_rows = 1usize << options.tile_rows_log2;
-    apply_compression_defaults(&mut config, options);
-    if complete_keyframe_search {
-        config.speed_settings.prediction.prediction_modes =
-            PredictionModesSetting::ComplexKeyframes;
-    }
-    apply_advanced(&mut config, &options.advanced)?;
-
-    let config = Config::new()
-        .with_encoder_config(config)
-        .with_threads(options.jobs);
+    let config = validated_rav1e_config(
+        width,
+        height,
+        sampling,
+        bit_depth,
+        options,
+        complete_keyframe_search,
+    )?;
     let mut context = config
         .new_context::<u16>()
         .map_err(|error| EncoderError::InvalidParam(error.to_string()))?;
@@ -923,6 +895,108 @@ fn encode_planes_with_prediction(
         frame_payload,
         pixel_channels: planes.len() as u8,
     })
+}
+
+// This builds and validates settings only: no context, threads, frame or samples.
+// Keep it identical for preflight and the actual rav1e path.
+fn validated_rav1e_config(
+    width: usize,
+    height: usize,
+    sampling: Sampling,
+    bit_depth: u8,
+    options: &EncoderOptions,
+    complete_keyframe_search: bool,
+) -> Result<Config, EncoderError> {
+    let chroma_sampling = match sampling {
+        Sampling::Cs400 => ChromaSampling::Cs400,
+        Sampling::Cs420 => ChromaSampling::Cs420,
+        Sampling::Cs422 => ChromaSampling::Cs422,
+        Sampling::Cs444 => ChromaSampling::Cs444,
+    };
+    let mut config = Rav1eEncoderConfig::with_speed_preset(options.speed);
+    config.width = width;
+    config.height = height;
+    config.bit_depth = usize::from(bit_depth);
+    config.chroma_sampling = chroma_sampling;
+    config.pixel_range = pixel_range(options);
+    config.color_description = color_description(options);
+    config.time_base = Rational::new(1, 1);
+    config.still_picture = true;
+    config.quantizer = quality_to_quantizer_for_options(options.quality, options.speed);
+    config.min_quantizer = config.quantizer as u8;
+    config.set_key_frame_interval(1, 1);
+    config.tile_cols = 1usize << options.tile_cols_log2;
+    config.tile_rows = 1usize << options.tile_rows_log2;
+    apply_compression_defaults(&mut config, options);
+    if complete_keyframe_search {
+        config.speed_settings.prediction.prediction_modes =
+            PredictionModesSetting::ComplexKeyframes;
+    }
+    apply_advanced(&mut config, &options.advanced)?;
+
+    let config = Config::new()
+        .with_encoder_config(config)
+        .with_threads(options.jobs);
+    config
+        .validate()
+        .map_err(|error| EncoderError::InvalidParam(error.to_string()))?;
+    Ok(config)
+}
+
+fn validate_lossless_dimensions(width: usize, height: usize) -> Result<(u32, u32), EncoderError> {
+    let width = u32::try_from(width)
+        .map_err(|_| EncoderError::InvalidParam("image width exceeds u32".to_string()))?;
+    let height = u32::try_from(height)
+        .map_err(|_| EncoderError::InvalidParam("image height exceeds u32".to_string()))?;
+    crate::lossless_headers::pick_level(width, height)
+        .map_err(|error| EncoderError::Bitstream(error.to_string()))?;
+    Ok((width, height))
+}
+
+fn native_alpha_backend_options(options: &EncoderOptions, bit_depth: u8) -> EncoderOptions {
+    EncoderOptions {
+        quality: options.quality_alpha,
+        quality_alpha: options.quality_alpha,
+        color_information: None,
+        pixel_information: Some(PixelInformation {
+            bits_per_channel: vec![bit_depth],
+            extended_channels: None,
+        }),
+        ..options.clone()
+    }
+}
+
+fn validate_native_backend_settings(
+    width: usize,
+    height: usize,
+    sampling: Sampling,
+    bit_depth: u8,
+    has_alpha: bool,
+    options: &EncoderOptions,
+) -> Result<(), EncoderError> {
+    if color_lossless_requested(options) {
+        validate_lossless_controls(options, "native primary")?;
+        validate_lossless_dimensions(width, height)?;
+    } else {
+        validated_rav1e_config(width, height, sampling, bit_depth, options, false)?;
+    }
+    if has_alpha {
+        if alpha_lossless_requested(options) {
+            validate_lossless_controls(options, "native alpha")?;
+            validate_lossless_dimensions(width, height)?;
+        } else {
+            let alpha_options = native_alpha_backend_options(options, bit_depth);
+            validated_rav1e_config(
+                width,
+                height,
+                Sampling::Cs400,
+                bit_depth,
+                &alpha_options,
+                false,
+            )?;
+        }
+    }
+    Ok(())
 }
 
 fn apply_compression_defaults(config: &mut Rav1eEncoderConfig, options: &EncoderOptions) {
@@ -2535,3 +2609,70 @@ mod tests {
 #[cfg(test)]
 #[path = "encoder_backend_tests.rs"]
 mod backend_tests;
+
+#[cfg(test)]
+mod preflight_backend_tests {
+    use super::*;
+
+    #[test]
+    fn selected_backend_dimensions_include_alpha_and_all_lossless_level_limits() {
+        let mut options = EncoderOptions {
+            lossless: true,
+            color_information: None,
+            ..Default::default()
+        };
+        for (width, height, valid) in [
+            (1, 1, true),
+            (16384, 1, true),
+            (16385, 1, false),
+            (1, 8704, true),
+            (1, 8705, false),
+            (4096, 8704, true),
+            (4097, 8704, false),
+        ] {
+            assert_eq!(
+                validate_native_backend_settings(
+                    width,
+                    height,
+                    Sampling::Cs400,
+                    8,
+                    false,
+                    &options
+                )
+                .is_ok(),
+                valid,
+                "{width}x{height}"
+            );
+        }
+        options.lossless = false;
+        options.quality = 60;
+        options.quality_alpha = 60;
+        // Lossy is governed by rav1e's settings, not the lossless level table.
+        for (width, height, valid) in [
+            (16385, 1, true),
+            (65535, 1, true),
+            (65536, 1, false),
+            (1, 65535, true),
+            (1, 65536, false),
+        ] {
+            assert_eq!(
+                validate_native_backend_settings(width, height, Sampling::Cs400, 8, true, &options)
+                    .is_ok(),
+                valid,
+                "lossy {width}x{height}"
+            );
+        }
+        options.quality_alpha = 100;
+        assert!(
+            validate_native_backend_settings(16385, 1, Sampling::Cs400, 8, false, &options).is_ok()
+        );
+        assert!(
+            validate_native_backend_settings(16385, 1, Sampling::Cs400, 8, true, &options).is_err()
+        );
+        options.quality = 100;
+        options.quality_alpha = 60;
+        assert!(
+            validate_native_backend_settings(16385, 1, Sampling::Cs400, 8, true, &options).is_err()
+        );
+    }
+}

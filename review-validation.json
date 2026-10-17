@@ -1,0 +1,21 @@
+{
+  "date_utc": "2026-10-17",
+  "base": "c9a333b04ee5fdccabfc66104c7463ea9a1ed244",
+  "rust": "1.91.0",
+  "candidate_version": "0.1.0",
+  "shared_git_revision": "5c73c7f26c276098ddd761fb20b956302a462001",
+  "local_checks": {
+    "cargo_test_locked_offline_release_lib_tests": {"passed": 93, "failed": 0},
+    "cargo_clippy_locked_offline_all_targets": "passed with the same three inherited collapsible_else_if warnings in lossless_tile.rs",
+    "cargo_fmt_all_check": "passed",
+    "cargo_rustdoc_lib_Dwarnings": "passed",
+    "cargo_check_wasm32_unknown_unknown": "passed"
+  },
+  "new_regressions": [
+    "invalid tune, boolean type, unknown key, lookahead bound and tx-domain cross-option reject in both preflight and encode",
+    "invalid settings and dimensions produce zero adapter sample copies and zero native backend entries",
+    "valid psnr, psychovisual and psy tune values encode",
+    "lossless width, height and picture-size boundaries; lossy rav1e dimensions; independently selected alpha backend"
+  ],
+  "scope": "No publication, merge, tag or release. Registry readiness and independent encoder CI are not established by these local checks."
+}

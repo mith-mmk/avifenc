@@ -477,6 +477,8 @@ pub fn encode_ex(
                         )?
                     }
                 };
+                #[cfg(test)]
+                ADAPTER_SAMPLE_COPIES.with(|count| count.set(count.get() + 1));
                 samples.push(value);
             }
         }
@@ -502,4 +504,143 @@ pub fn encode_ex(
     )?;
     report.encoded = true;
     Ok(EncodedImageEx { bytes, report })
+}
+
+#[cfg(test)]
+thread_local! {
+    static ADAPTER_SAMPLE_COPIES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+#[cfg(test)]
+mod preflight_tests {
+    use super::*;
+    use crate::{
+        DataMap, EncoderOptions, Metadata, NativeColorInformation, NativeSubsampling,
+        NclxColorInformation,
+    };
+
+    fn options(lossless: bool) -> EncodeOptionsEx {
+        EncodeOptionsEx {
+            native: NativeEncodeOptions {
+                bit_depth: 8,
+                subsampling: NativeSubsampling::Cs400,
+                encoder: EncoderOptions {
+                    lossless,
+                    quality: 60,
+                    quality_alpha: 60,
+                    color_information: None,
+                    ..Default::default()
+                },
+                color_information: NativeColorInformation::from_nclx(NclxColorInformation {
+                    color_primaries: 1,
+                    transfer_characteristics: 13,
+                    matrix_coefficients: 6,
+                    full_range_flag: true,
+                }),
+            },
+            precision: PrecisionPolicy::Exact,
+            color: ColorPolicyEx::Preserve,
+        }
+    }
+    fn gray(samples: &[u8]) -> ImageViewEx<'_> {
+        ImageViewEx::Packed(PackedImageViewEx {
+            plane: PlaneViewEx {
+                samples: SamplesRef::U8(samples),
+                layout: PlaneLayoutEx {
+                    width: samples.len(),
+                    height: 1,
+                    valid_bits: 8,
+                    offset_bytes: 0,
+                    row_stride_bytes: samples.len(),
+                },
+            },
+            channels: PackedChannels::Gray,
+            alpha: AlphaMode::Absent,
+            color: ColorMetadataRef {
+                icc: None,
+                cicp: Some(Cicp {
+                    primaries: 1,
+                    transfer: 13,
+                    matrix: 6,
+                }),
+            },
+        })
+    }
+    fn rejected_without_copy(samples: &[u8], options: &EncodeOptionsEx, message: &str) {
+        let original = samples.to_vec();
+        let view = gray(samples);
+        ADAPTER_SAMPLE_COPIES.with(|count| count.set(0));
+        crate::encoder::reset_native_backend_entries();
+        let preview = preflight_ex(view, options).unwrap_err().to_string();
+        let encode = encode_ex(view, options).unwrap_err().to_string();
+        assert_eq!(preview, encode);
+        assert!(preview.contains(message), "{preview}");
+        assert_eq!(ADAPTER_SAMPLE_COPIES.with(std::cell::Cell::get), 0);
+        assert_eq!(crate::encoder::native_backend_entry_count(), 0);
+        assert_eq!(samples, original);
+    }
+    #[test]
+    fn advanced_values_types_unknown_keys_and_combinations_fail_before_copy() {
+        let cases = [
+            (
+                vec![("tune", DataMap::Ascii("invalid".into()))],
+                "tune must be psnr or psychovisual",
+            ),
+            (
+                vec![("cdef", DataMap::Raw(vec![1]))],
+                "cdef must be boolean",
+            ),
+            (
+                vec![("unknown-setting", DataMap::UInt(1))],
+                "unsupported advanced codec option",
+            ),
+            (
+                vec![("rdo-lookahead-frames", DataMap::UInt(0))],
+                "lookahead",
+            ),
+            (
+                vec![
+                    ("tx-domain-rate", DataMap::UInt(1)),
+                    ("tx-domain-distortion", DataMap::UInt(0)),
+                ],
+                "tx-domain-rate cannot be combined",
+            ),
+        ];
+        for (advanced, message) in cases {
+            let mut options = options(false);
+            options.native.encoder.advanced = advanced
+                .into_iter()
+                .map(|(k, v)| (k.into(), v))
+                .collect::<Metadata>();
+            rejected_without_copy(&[0], &options, message);
+        }
+        for tune in ["psnr", "psychovisual", "psy"] {
+            let mut options = options(false);
+            options
+                .native
+                .encoder
+                .advanced
+                .insert("tune".into(), DataMap::Ascii(tune.into()));
+            let samples = [0];
+            let view = gray(&samples);
+            assert!(!preflight_ex(view, &options).unwrap().encoded);
+            assert!(encode_ex(view, &options).unwrap().report.encoded);
+        }
+    }
+    #[test]
+    fn dimensions_fail_before_copy_and_backend_entry() {
+        rejected_without_copy(
+            &vec![0; 16385],
+            &options(true),
+            "image dimensions exceed AV1 level 6.0 limits",
+        );
+        rejected_without_copy(&vec![0; 65536], &options(false), "width");
+        assert!(preflight_ex(gray(&vec![0; 16384]), &options(true)).is_ok());
+        assert!(preflight_ex(gray(&vec![0; 16385]), &options(false)).is_ok());
+        ADAPTER_SAMPLE_COPIES.with(|count| count.set(0));
+        let samples = [0];
+        let out = encode_ex(gray(&samples), &options(true)).unwrap();
+        assert!(out.report.encoded);
+        assert_eq!(ADAPTER_SAMPLE_COPIES.with(std::cell::Cell::get), 1);
+    }
 }
