@@ -11,6 +11,13 @@ mod container;
 mod encoder;
 mod error;
 mod image;
+mod image_ex;
+/// Codec-independent shared pixel model, also used by avif-rust.
+pub use avif_image_buffer as buffer;
+pub use image_ex::{
+    ColorPolicyEx, ConversionEx, EncodeErrorEx, EncodeOptionsEx, EncodeReportEx, EncodedImageEx,
+    encode_ex, preflight_ex,
+};
 mod lossless_backend;
 mod lossless_cdf;
 mod lossless_headers;

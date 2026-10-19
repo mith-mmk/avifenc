@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.1.0 - Unreleased
+
+- Add shared image-buffer views and explicit precision/color encode preflight.
+- Correct alpha auxiliary references to point from alpha to primary.
+- Prepare versioned shared-buffer registry dependency and package metadata.
+- This candidate has not been published; publish shared 0.1.0 first.
+
 ## 0.0.7 - 2026-08-31
 
 ### Changed

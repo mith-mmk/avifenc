@@ -1,13 +1,13 @@
 [package]
 name = "avifenc-rust"
-version = "0.0.7"
+version = "0.1.0"
 edition = "2024"
 rust-version = "1.88"
 description = "Pure Rust AVIF encoder with avif-rust-compatible image and callback APIs"
 keywords = ["avif", "av1", "image", "encoder", "codec"]
 categories = ["multimedia::images", "encoding"]
 license = "MIT"
-repository = "https://github.com/mith-mmk/avifenc-rust.git"
+repository = "https://github.com/mith-mmk/avifenc.git"
 
 [features]
 default = []
@@ -15,6 +15,7 @@ multithread = ["rav1e/threading"]
 profile = []
 
 [dependencies]
+avif-image-buffer = { version = "0.1.0", git = "https://github.com/mith-mmk/avif-rust.git", rev = "5c73c7f26c276098ddd761fb20b956302a462001" }
 gamut-bitstream = "=0.2.1"
 gamut-core = "=0.1.0"
 gamut-dsp = "=0.2.1"

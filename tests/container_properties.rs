@@ -291,8 +291,8 @@ fn native_property_graph_keeps_item_ids_references_and_extents_consistent() {
                 let reference_entries = child_boxes(&iref[4..]);
                 assert_eq!(reference_entries.len(), 1);
                 assert_eq!(reference_entries[0].0, *b"auxl");
-                // Legacy writer direction is intentionally characterized as 1 -> 2.
-                assert_eq!(reference_entries[0].1, &[0, 1, 0, 1, 0, 2]);
+                // Auxiliary alpha references its associated primary color item.
+                assert_eq!(reference_entries[0].1, &[0, 2, 0, 1, 0, 1]);
                 assert!(item_ids.contains(&read16(reference_entries[0].1, 0)));
                 assert!(item_ids.contains(&read16(reference_entries[0].1, 4)));
             }
