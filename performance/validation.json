@@ -1,0 +1,31 @@
+{
+  "release_all_features": {
+    "command": "cargo test --locked --release --all-features",
+    "passed": 95,
+    "failed": 0,
+    "ignored": 0
+  },
+  "format": "passed",
+  "diff_check": "passed",
+  "policy": "No merge, release, publication, tag, forced push or dependency pin change.",
+  "release_default": {
+    "passed": 95,
+    "failed": 0,
+    "ignored": 0
+  },
+  "strict_clippy": {
+    "status": "fails identically at baseline and after change",
+    "lint": "clippy::collapsible_else_if",
+    "baseline_locations": [
+      "src/encoder.rs:1242",
+      "src/encoder.rs:1468",
+      "src/lossless_tile.rs:2143"
+    ],
+    "current_locations": [
+      "src/encoder.rs:1242",
+      "src/encoder.rs:1474",
+      "src/lossless_tile.rs:2143"
+    ],
+    "diagnostic_isolation": "cargo clippy --locked --all-features --all-targets -- -D warnings -A clippy::collapsible_else_if passes; no repository lint gate or source suppression changed"
+  }
+}

@@ -1353,12 +1353,18 @@ fn encode_rgba8_rgb_lossless(
     height: u32,
     speed: u8,
 ) -> Result<EncodedFrame, EncoderError> {
-    let rgb = image
-        .rgba
-        .chunks_exact(4)
-        .flat_map(|pixel| pixel[..3].iter().copied())
-        .collect::<Vec<_>>();
-    encode_gamut_lossless_frame(width, height, &rgb, speed)
+    // RGBA8 has already been validated. Build the identity-matrix GBR
+    // planes directly instead of staging interleaved RGB at two precisions.
+    let sample_count = image.rgba.len() / 4;
+    let mut g = Vec::with_capacity(sample_count);
+    let mut b = Vec::with_capacity(sample_count);
+    let mut r = Vec::with_capacity(sample_count);
+    for pixel in image.rgba.chunks_exact(4) {
+        r.push(u16::from(pixel[0]));
+        g.push(u16::from(pixel[1]));
+        b.push(u16::from(pixel[2]));
+    }
+    encode_lossless_gbr_planes(width, height, 8, [&g, &b, &r], speed)
 }
 
 fn encode_rgba8_alpha_lossless(
@@ -1667,16 +1673,6 @@ fn encode_lossless_native_full(
     write_avif(buffers.width, buffers.height, &primary, None, &effective)
 }
 
-fn encode_gamut_lossless_frame(
-    width: u32,
-    height: u32,
-    rgb: &[u8],
-    speed: u8,
-) -> Result<EncodedFrame, EncoderError> {
-    let rgb = rgb.iter().copied().map(u16::from).collect::<Vec<_>>();
-    encode_gamut_lossless_samples(width, height, &rgb, 8, speed)
-}
-
 fn encode_gamut_lossless_samples(
     width: u32,
     height: u32,
@@ -1721,6 +1717,16 @@ fn encode_gamut_lossless_samples(
         g.push(pixel[1]);
         b.push(pixel[2]);
     }
+    encode_lossless_gbr_planes(width, height, bit_depth, [&g, &b, &r], speed)
+}
+
+fn encode_lossless_gbr_planes(
+    width: u32,
+    height: u32,
+    bit_depth: u8,
+    gbr: [&[u16]; 3],
+    speed: u8,
+) -> Result<EncodedFrame, EncoderError> {
     let planes = LosslessPlanes {
         width,
         height,
@@ -1732,7 +1738,7 @@ fn encode_gamut_lossless_samples(
         transfer_characteristics: 13,
         matrix_coefficients: 0,
         full_range: true,
-        planes: vec![&g, &b, &r],
+        planes: gbr.to_vec(),
     };
     encode_lossless_plane_set(&planes, speed)
 }
@@ -2676,5 +2682,49 @@ mod preflight_backend_tests {
         assert!(
             validate_native_backend_settings(16385, 1, Sampling::Cs400, 8, true, &options).is_err()
         );
+    }
+}
+
+#[cfg(test)]
+mod rgba8_planar_lossless_tests {
+    use super::*;
+
+    #[test]
+    fn direct_rgba8_gbr_matches_interleaved_rgb_route() {
+        for (width, height) in [(1, 1), (5, 3), (16, 9)] {
+            let rgba = (0..width * height)
+                .flat_map(|i| {
+                    [
+                        (i * 37) as u8,
+                        (255 - i % 256) as u8,
+                        (i * 101) as u8,
+                        (i * 17) as u8,
+                    ]
+                })
+                .collect();
+            let image = ImageBuffer {
+                width,
+                height,
+                rgba,
+            };
+            let rgb = image
+                .rgba
+                .chunks_exact(4)
+                .flat_map(|pixel| pixel[..3].iter().copied().map(u16::from))
+                .collect::<Vec<_>>();
+            for speed in [0, 6, 10] {
+                let direct =
+                    encode_rgba8_rgb_lossless(&image, width as u32, height as u32, speed).unwrap();
+                let staged =
+                    encode_gamut_lossless_samples(width as u32, height as u32, &rgb, 8, speed)
+                        .unwrap();
+                assert_eq!(direct.sequence_header, staged.sequence_header);
+                assert_eq!(
+                    direct.frame_payload, staged.frame_payload,
+                    "{width}x{height} speed{speed}"
+                );
+                assert_eq!(direct.pixel_channels, staged.pixel_channels);
+            }
+        }
     }
 }
