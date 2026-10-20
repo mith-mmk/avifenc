@@ -2,6 +2,11 @@
 
 ## 0.1.0 - Unreleased
 
+- Add opt-in `asm` forwarding to rav1e's native SIMD, with correct 8-bit
+  pixel storage; keep portable defaults and all quality/search presets.
+- Add frozen portable 8/10/12-bit bitstream oracles and SIMD performance
+  comparisons with explicit native-build, executable-size and RSS tradeoffs.
+
 - Add shared image-buffer views and explicit precision/color encode preflight.
 - Correct alpha auxiliary references to point from alpha to primary.
 - Prepare versioned shared-buffer registry dependency and package metadata.

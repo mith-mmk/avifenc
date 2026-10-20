@@ -1,0 +1,142 @@
+{
+  "system": "Linux-6.18.55-x86_64-with-glibc2.41",
+  "before_binary": "/tmp/perf3-before",
+  "after_binary": "/tmp/perf3-asm-final",
+  "arguments": [
+    "64",
+    "64",
+    "60",
+    "opaque",
+    "3"
+  ],
+  "trials": {
+    "before": [
+      {
+        "median_ms": 97.293312,
+        "min_ms": 96.844722,
+        "max_ms": 99.012833,
+        "iterations": 3,
+        "allocations": 17018,
+        "requested_bytes": 15573284,
+        "checksum": "b2e644545a116344",
+        "peak_rss_kib": 4532,
+        "workload": "dimensions=64x64 bit_depth=8 quality=60 quality_alpha=60 speed=10 jobs=0 alpha=false input=performance/third-pass/natural64.rgba"
+      },
+      {
+        "median_ms": 92.989963,
+        "min_ms": 91.760919,
+        "max_ms": 96.287212,
+        "iterations": 3,
+        "allocations": 17018,
+        "requested_bytes": 15573284,
+        "checksum": "b2e644545a116344",
+        "peak_rss_kib": 4440,
+        "workload": "dimensions=64x64 bit_depth=8 quality=60 quality_alpha=60 speed=10 jobs=0 alpha=false input=performance/third-pass/natural64.rgba"
+      },
+      {
+        "median_ms": 99.00162,
+        "min_ms": 98.948992,
+        "max_ms": 99.672301,
+        "iterations": 3,
+        "allocations": 17018,
+        "requested_bytes": 15573284,
+        "checksum": "b2e644545a116344",
+        "peak_rss_kib": 4408,
+        "workload": "dimensions=64x64 bit_depth=8 quality=60 quality_alpha=60 speed=10 jobs=0 alpha=false input=performance/third-pass/natural64.rgba"
+      },
+      {
+        "median_ms": 86.338983,
+        "min_ms": 85.57901,
+        "max_ms": 88.246368,
+        "iterations": 3,
+        "allocations": 17018,
+        "requested_bytes": 15573284,
+        "checksum": "b2e644545a116344",
+        "peak_rss_kib": 4548,
+        "workload": "dimensions=64x64 bit_depth=8 quality=60 quality_alpha=60 speed=10 jobs=0 alpha=false input=performance/third-pass/natural64.rgba"
+      },
+      {
+        "median_ms": 87.844935,
+        "min_ms": 87.551183,
+        "max_ms": 88.228533,
+        "iterations": 3,
+        "allocations": 17018,
+        "requested_bytes": 15573284,
+        "checksum": "b2e644545a116344",
+        "peak_rss_kib": 4400,
+        "workload": "dimensions=64x64 bit_depth=8 quality=60 quality_alpha=60 speed=10 jobs=0 alpha=false input=performance/third-pass/natural64.rgba"
+      }
+    ],
+    "after": [
+      {
+        "median_ms": 43.415778,
+        "min_ms": 41.660326,
+        "max_ms": 45.207113,
+        "iterations": 3,
+        "allocations": 363,
+        "requested_bytes": 8033316,
+        "checksum": "b2e644545a116344",
+        "peak_rss_kib": 5372,
+        "workload": "dimensions=64x64 bit_depth=8 quality=60 quality_alpha=60 speed=10 jobs=0 alpha=false input=performance/third-pass/natural64.rgba"
+      },
+      {
+        "median_ms": 46.237294,
+        "min_ms": 43.759605,
+        "max_ms": 48.799728,
+        "iterations": 3,
+        "allocations": 363,
+        "requested_bytes": 8033316,
+        "checksum": "b2e644545a116344",
+        "peak_rss_kib": 5424,
+        "workload": "dimensions=64x64 bit_depth=8 quality=60 quality_alpha=60 speed=10 jobs=0 alpha=false input=performance/third-pass/natural64.rgba"
+      },
+      {
+        "median_ms": 47.119038,
+        "min_ms": 45.051135,
+        "max_ms": 48.114699,
+        "iterations": 3,
+        "allocations": 363,
+        "requested_bytes": 8033316,
+        "checksum": "b2e644545a116344",
+        "peak_rss_kib": 5224,
+        "workload": "dimensions=64x64 bit_depth=8 quality=60 quality_alpha=60 speed=10 jobs=0 alpha=false input=performance/third-pass/natural64.rgba"
+      },
+      {
+        "median_ms": 45.853539,
+        "min_ms": 44.945208,
+        "max_ms": 45.990192,
+        "iterations": 3,
+        "allocations": 363,
+        "requested_bytes": 8033316,
+        "checksum": "b2e644545a116344",
+        "peak_rss_kib": 5224,
+        "workload": "dimensions=64x64 bit_depth=8 quality=60 quality_alpha=60 speed=10 jobs=0 alpha=false input=performance/third-pass/natural64.rgba"
+      },
+      {
+        "median_ms": 48.179023,
+        "min_ms": 46.520685,
+        "max_ms": 49.081446,
+        "iterations": 3,
+        "allocations": 363,
+        "requested_bytes": 8033316,
+        "checksum": "b2e644545a116344",
+        "peak_rss_kib": 5316,
+        "workload": "dimensions=64x64 bit_depth=8 quality=60 quality_alpha=60 speed=10 jobs=0 alpha=false input=performance/third-pass/natural64.rgba"
+      }
+    ]
+  },
+  "summary": {
+    "before": {
+      "median_ms": 92.989963,
+      "allocations": 17018,
+      "requested_bytes": 15573284,
+      "peak_rss_kib": 4440
+    },
+    "after": {
+      "median_ms": 46.237294,
+      "allocations": 363,
+      "requested_bytes": 8033316,
+      "peak_rss_kib": 5316
+    }
+  }
+}

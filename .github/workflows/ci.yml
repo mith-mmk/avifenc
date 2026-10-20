@@ -1,0 +1,48 @@
+name: ci
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: test (${{ matrix.name }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: portable
+            rust: stable
+            features: ""
+          - name: asm
+            rust: stable
+            features: asm
+          - name: all-features-msrv
+            rust: 1.88.0
+            features: asm,multithread,profile
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ matrix.rust }}
+          components: rustfmt
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.name }}
+      - name: Install native assembler
+        if: matrix.features != ''
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y nasm
+          nasm --version
+      - name: Required portable bitstream references (8/10/12 bit)
+        run: cargo test --locked --release --features "${{ matrix.features }}" --test simd_output
+      - name: Full regressions
+        run: cargo test --locked --release --features "${{ matrix.features }}"
+      - name: Format
+        if: matrix.name == 'portable'
+        run: cargo fmt --all -- --check

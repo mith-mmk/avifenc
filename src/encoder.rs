@@ -1,6 +1,6 @@
 use rav1e::prelude::{
     ChromaSampling, ColorDescription, ColorPrimaries, Config, EncoderConfig as Rav1eEncoderConfig,
-    EncoderStatus, MatrixCoefficients, PixelRange, PredictionModesSetting, Rational,
+    EncoderStatus, MatrixCoefficients, Pixel, PixelRange, PredictionModesSetting, Rational,
     SegmentationLevel, TransferCharacteristics, Tune,
 };
 
@@ -861,10 +861,29 @@ fn encode_planes_with_prediction(
             complete_keyframe_search,
         )?
     };
+    // Native SIMD dispatch uses the pixel type to select 8/10/12-bit kernels.
+    // Keep the existing u16 storage for portable builds; SIMD-enabled 8-bit
+    // images must use u8 so they do not enter the high-bit-depth kernels.
+    #[cfg(feature = "asm")]
+    if bit_depth == 8 {
+        return encode_rav1e_pixels::<u8>(width, height, planes, sampling, &config);
+    }
+    encode_rav1e_pixels::<u16>(width, height, planes, sampling, &config)
+}
+
+// The input range is checked before choosing the storage type. rav1e uses
+// i16 coefficients with u8 pixels and i32 coefficients with u16 pixels.
+fn encode_rav1e_pixels<T: Pixel>(
+    width: usize,
+    height: usize,
+    planes: &[PlaneInput<'_>],
+    sampling: Sampling,
+    config: &Config,
+) -> Result<EncodedFrame, EncoderError> {
     let mut context = {
         let _context = Guard::new(Kind::Rav1eContext);
         config
-            .new_context::<u16>()
+            .new_context::<T>()
             .map_err(|error| EncoderError::InvalidParam(error.to_string()))?
     };
     let mut frame = {
@@ -881,7 +900,11 @@ fn encode_planes_with_prediction(
                 .take(plane.height)
                 .zip(plane.samples.chunks_exact(plane.width))
             {
-                destination_row[..plane.width].copy_from_slice(source_row);
+                for (destination, &source) in
+                    destination_row[..plane.width].iter_mut().zip(source_row)
+                {
+                    *destination = T::cast_from(source);
+                }
             }
             // rav1e's plane padding takes the visible luma dimensions and applies
             // the plane's subsampling internally. Passing the already-subsampled

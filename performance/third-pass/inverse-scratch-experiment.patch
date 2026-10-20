@@ -1,0 +1,14 @@
+--- a/src/transform/inverse.rs
++++ b/src/transform/inverse.rs
+@@ -1645 +1645,10 @@
+-    let mut buffer = vec![0i32; width * height].into_boxed_slice();
++    // Bounded small-transform scratch: preserve zero initialization, including
++    // 64-point implicit zeros, without a heap allocation for areas <= 1024.
++    let mut stack = [std::mem::MaybeUninit::<i32>::uninit(); 32 * 32];
++    let mut heap;
++    let buffer: &mut [i32] = if width * height <= stack.len() {
++      crate::util::init_slice_repeat_mut(&mut stack[..width * height], 0)
++    } else {
++      heap = vec![0i32; width * height];
++      &mut heap
++    };

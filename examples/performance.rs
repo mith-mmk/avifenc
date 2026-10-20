@@ -80,7 +80,7 @@ fn main() {
     let bit_depth: u8 = args.get(6).map_or(8, |s| s.parse().unwrap());
     let speed: u8 = args.get(7).map_or(10, |s| s.parse().unwrap());
     assert!(matches!(bit_depth, 8 | 10 | 12));
-    let rgba = (0..width * height)
+    let generated = (0..width * height)
         .flat_map(|i| {
             let x = i % width;
             let y = i / width;
@@ -96,6 +96,11 @@ fn main() {
             ]
         })
         .collect();
+    let input = std::env::var("AVIF_PERF_INPUT").ok();
+    let rgba = input
+        .as_ref()
+        .map_or_else(|| generated, |path| std::fs::read(path).unwrap());
+    assert_eq!(rgba.len(), width * height * 4);
     let image = avifenc_rust::ImageBuffer {
         width,
         height,
@@ -113,7 +118,8 @@ fn main() {
         ..Default::default()
     };
     println!(
-        "dimensions={width}x{height} bit_depth={bit_depth} quality={quality} quality_alpha={quality} speed={speed} jobs=0 alpha={alpha}"
+        "dimensions={width}x{height} bit_depth={bit_depth} quality={quality} quality_alpha={quality} speed={speed} jobs=0 alpha={alpha} input={}",
+        input.as_deref().unwrap_or("procedural")
     );
     if bit_depth == 8 {
         measure(

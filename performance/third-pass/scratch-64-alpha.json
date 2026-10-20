@@ -1,0 +1,142 @@
+{
+  "system": "Linux-6.18.55-x86_64-with-glibc2.41",
+  "before_binary": "/tmp/perf3-before",
+  "after_binary": "/tmp/perf3-scratch",
+  "arguments": [
+    "64",
+    "64",
+    "60",
+    "alpha",
+    "3"
+  ],
+  "trials": {
+    "before": [
+      {
+        "median_ms": 444.883675,
+        "min_ms": 434.585044,
+        "max_ms": 460.059325,
+        "iterations": 3,
+        "allocations": 99722,
+        "requested_bytes": 54934879,
+        "checksum": "e970c12e63eb138c",
+        "peak_rss_kib": 4632,
+        "workload": "dimensions=64x64 bit_depth=8 quality=60 quality_alpha=60 speed=10 jobs=0 alpha=true input=procedural"
+      },
+      {
+        "median_ms": 424.335328,
+        "min_ms": 422.18953,
+        "max_ms": 426.842761,
+        "iterations": 3,
+        "allocations": 99722,
+        "requested_bytes": 54934879,
+        "checksum": "e970c12e63eb138c",
+        "peak_rss_kib": 4616,
+        "workload": "dimensions=64x64 bit_depth=8 quality=60 quality_alpha=60 speed=10 jobs=0 alpha=true input=procedural"
+      },
+      {
+        "median_ms": 416.54893,
+        "min_ms": 416.253714,
+        "max_ms": 423.422971,
+        "iterations": 3,
+        "allocations": 99722,
+        "requested_bytes": 54934879,
+        "checksum": "e970c12e63eb138c",
+        "peak_rss_kib": 4636,
+        "workload": "dimensions=64x64 bit_depth=8 quality=60 quality_alpha=60 speed=10 jobs=0 alpha=true input=procedural"
+      },
+      {
+        "median_ms": 450.29751,
+        "min_ms": 438.578704,
+        "max_ms": 451.570943,
+        "iterations": 3,
+        "allocations": 99722,
+        "requested_bytes": 54934879,
+        "checksum": "e970c12e63eb138c",
+        "peak_rss_kib": 4708,
+        "workload": "dimensions=64x64 bit_depth=8 quality=60 quality_alpha=60 speed=10 jobs=0 alpha=true input=procedural"
+      },
+      {
+        "median_ms": 451.960028,
+        "min_ms": 444.722017,
+        "max_ms": 475.555706,
+        "iterations": 3,
+        "allocations": 99722,
+        "requested_bytes": 54934879,
+        "checksum": "e970c12e63eb138c",
+        "peak_rss_kib": 4620,
+        "workload": "dimensions=64x64 bit_depth=8 quality=60 quality_alpha=60 speed=10 jobs=0 alpha=true input=procedural"
+      }
+    ],
+    "after": [
+      {
+        "median_ms": 485.320478,
+        "min_ms": 447.731877,
+        "max_ms": 545.18126,
+        "iterations": 3,
+        "allocations": 643,
+        "requested_bytes": 17599839,
+        "checksum": "e970c12e63eb138c",
+        "peak_rss_kib": 4840,
+        "workload": "dimensions=64x64 bit_depth=8 quality=60 quality_alpha=60 speed=10 jobs=0 alpha=true input=procedural"
+      },
+      {
+        "median_ms": 438.49938,
+        "min_ms": 414.728612,
+        "max_ms": 451.823213,
+        "iterations": 3,
+        "allocations": 643,
+        "requested_bytes": 17599839,
+        "checksum": "e970c12e63eb138c",
+        "peak_rss_kib": 4860,
+        "workload": "dimensions=64x64 bit_depth=8 quality=60 quality_alpha=60 speed=10 jobs=0 alpha=true input=procedural"
+      },
+      {
+        "median_ms": 413.413561,
+        "min_ms": 413.091445,
+        "max_ms": 414.323123,
+        "iterations": 3,
+        "allocations": 643,
+        "requested_bytes": 17599839,
+        "checksum": "e970c12e63eb138c",
+        "peak_rss_kib": 4752,
+        "workload": "dimensions=64x64 bit_depth=8 quality=60 quality_alpha=60 speed=10 jobs=0 alpha=true input=procedural"
+      },
+      {
+        "median_ms": 451.70467,
+        "min_ms": 444.554019,
+        "max_ms": 461.725901,
+        "iterations": 3,
+        "allocations": 643,
+        "requested_bytes": 17599839,
+        "checksum": "e970c12e63eb138c",
+        "peak_rss_kib": 4744,
+        "workload": "dimensions=64x64 bit_depth=8 quality=60 quality_alpha=60 speed=10 jobs=0 alpha=true input=procedural"
+      },
+      {
+        "median_ms": 451.594847,
+        "min_ms": 428.939646,
+        "max_ms": 454.994259,
+        "iterations": 3,
+        "allocations": 643,
+        "requested_bytes": 17599839,
+        "checksum": "e970c12e63eb138c",
+        "peak_rss_kib": 4768,
+        "workload": "dimensions=64x64 bit_depth=8 quality=60 quality_alpha=60 speed=10 jobs=0 alpha=true input=procedural"
+      }
+    ]
+  },
+  "summary": {
+    "before": {
+      "median_ms": 444.883675,
+      "allocations": 99722,
+      "requested_bytes": 54934879,
+      "peak_rss_kib": 4632
+    },
+    "after": {
+      "median_ms": 451.594847,
+      "allocations": 643,
+      "requested_bytes": 17599839,
+      "peak_rss_kib": 4768
+    }
+  }
+}

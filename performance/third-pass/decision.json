@@ -1,0 +1,24 @@
+{
+  "scratch_experiment": {
+    "decision": "not adopted",
+    "reason": "removes heap allocations, but no consistent throughput improvement and adoption requires maintaining a source fork of rav1e (~11MB source); small fixed scratch also adds4KiB stack per active inverse transform",
+    "patch": "inverse-scratch-experiment.patch",
+    "shipped_dependency_override": false
+  },
+  "asm": {
+    "decision": "opt-in feature, default=[] unchanged",
+    "maintenance": "existing rav1e0.8.1 native SIMD only; no fork/vendor or version switch. Adds nasm-rs0.3.2 build dependency; NASM>=2.15 plus native toolchain onx86_64. RuntimeCPUdispatch remains upstream. Binaries/RSS increase explicitly measured.",
+    "pixel_type": "u8 only for8-bit with featureasm;10/12bit and portable build retainu16",
+    "material_new_rationale": "Unlike previously rejected u8-only scalar specialization, native SIMD dispatch selects low/high-depth kernels by pixel type. Raw enablingASM with8bitu16 changed bitstreams; correctu8 SIMD routing restores complete baseline bitstreams and produces substantial gains.",
+    "default_quality_or_presets_changed": false
+  },
+  "dispatch_probe": {
+    "case": "32x24 quality60 speed10 alpha,8bit",
+    "portable_u16": "6666dc53b980be23",
+    "raw_asm_u16": "6582551f1122d55f",
+    "raw_asm_u16_cpu_RUST": "6666dc53b980be23",
+    "raw_asm_u16_cpu_SSE2": "6666dc53b980be23",
+    "correct_asm_u8": "6666dc53b980be23",
+    "note": "Raw u16 ASM variant is not shipped. Source inverse dispatch sends U16 depths other than10 through HBD12 table; this path observation is not claimed as a complete isolated upstream root-cause proof. Required frozen regression rejects the observed incompatible variant."
+  }
+}

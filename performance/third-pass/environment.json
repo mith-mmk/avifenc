@@ -1,0 +1,54 @@
+{
+  "baseline_revision": "6a7ba0a8ae42425fff4b2e4cacddd3380d6edbfb",
+  "platform": "Linux-6.18.55-x86_64-with-glibc2.41",
+  "cpu": "AMD EPYC 9V74 80-Core Processor",
+  "rustc": "rustc 1.91.0 (f8297e351 2025-10-28)\nbinary: rustc\ncommit-hash: f8297e351a40c1439a467bbbb6879088047f50b3\ncommit-date: 2025-10-28\nhost: x86_64-unknown-linux-gnu\nrelease: 1.91.0\nLLVM version: 21.1.2\n",
+  "rustflags": "",
+  "comparison": "baseline default features vs asm only, no threading; identical quality60 speed10 jobs0 and input/depth;5freshprocesspairsAB/BA,9timedcalls for128/64alpha and3timedcalls forothers,1warmup+separateallocationcall. No concurrentcompilation/benchmarks during recorded trials.",
+  "asm_dispatch": "AVX512ICL",
+  "nasm": {
+    "version": "2.16.03",
+    "source": "https://www.nasm.us/pub/nasm/releasebuilds/2.16.03/nasm-2.16.03.tar.xz",
+    "source_sha256": "1412a1c760bbd05db026b6c0d1657affd6631cd0a63cddb6f73cc6d4aa616148",
+    "install_scope": "temporary/tmp/perf3-tools/bin only; system toolchain unchanged"
+  },
+  "binaries": {
+    "baseline": {
+      "bytes": 2410304,
+      "sha256": "83e560097b697dc0f07e103e898a6a8575f347e0288c4472cc28b2cc4dbff0d4"
+    },
+    "asm": {
+      "bytes": 4158968,
+      "sha256": "45c6ee0c60226fd1ffdf25a29ab73d63354831c365d3dd7bb6097be428d50a38"
+    },
+    "scratch_experiment": {
+      "bytes": 2407608,
+      "sha256": "3d53a1c8555d77ad497b40422be4d4c4a1a3033a9616b876710f06a0b3cf228e"
+    },
+    "portable_final": {
+      "bytes": 2410512,
+      "sha256": "acbc296f418a2a4a84e20708de067c515a4032d0b0fe1d97bfb87ff9ce7604b0"
+    }
+  },
+  "reference_fixture_sha256": {
+    "portable-12bit.avif": "922523a34c6f3fbb459e07f5571d258d3ec3a2ba04427488a140e2fe0e273bc3",
+    "portable-8bit.avif": "e576b06fd3395f03fdffc82983d2440ac26f3c8301b835365d08ee19a2e9e2d0",
+    "portable-10bit.avif": "cac3828454115366b4c74628bfbdcbe4dbab4a3bc94f0825b0183014240c4d93"
+  },
+  "source_sha256": {
+    "src/encoder.rs": "5892167699484dd40dc91dcf5890e7cd8b3a460d0e7ede4d6c69562e2b61090f",
+    "Cargo.toml": "db82cf51ce5e91d72346069e6381c5723ff0510ea6fc46d4b92b5f5187f7a14b",
+    "Cargo.lock": "22341f6d1c73b1caa1d018c2cc6629fa6fbc98563d00ad4b8ad548908475030a",
+    "examples/performance.rs": "6355b90efbfba21d9d88221b6d35d4f69d095f9ebb3e2ef2a878bc9634509180",
+    "tests/simd_output.rs": "71bfb001194e0792a6abdcd9b8c915837fced87e89d28e7e2cc68d21476ed6b7"
+  },
+  "natural_input": {
+    "file": "natural64.rgba",
+    "sha256": "47224dd33d634dc527da5d6bcb6b7430a5fa7a2ac4ca2a2e7b4e704cfdc4c1f6",
+    "source_fixture": "avif-rust d3ea4e6 tests/plum-blossom-small.profile1.8bpc.yuv444.alpha-full.avif",
+    "source_sha256": "245a3dad6371dc702f29eb7e9735f843b63c525da871859728bedbe5bb274985",
+    "conversion": "ffmpeg7.1.5: -frames:v1 -vf scale=64:64:flags=bilinear -pix_fmt rgba -f rawvideo; alpha all255",
+    "committed": true
+  },
+  "asm_disabled_control": "portable-control.json; lossless path control=lossless-control.json"
+}
