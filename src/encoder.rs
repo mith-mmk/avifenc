@@ -468,7 +468,6 @@ pub fn encode_native_bytes(
             &effective,
         )?
     };
-    let primary = native_container_frame(primary, sampling);
     let alpha_frame = alpha
         .map(|samples| {
             let alpha_options = native_alpha_backend_options(&effective, options.bit_depth);
@@ -509,7 +508,7 @@ pub fn encode_native_bytes(
                     &alpha_options,
                 )
             }?;
-            Ok::<_, EncoderError>(native_container_frame(frame, Sampling::Cs400))
+            Ok::<_, EncoderError>(frame)
         })
         .transpose()?;
     let native_color = NativeColorSource {
@@ -527,11 +526,11 @@ pub fn encode_native_bytes(
     )
 }
 
-fn native_container_frame(mut frame: EncodedFrame, sampling: Sampling) -> EncodedFrame {
+fn normalize_container_frame(mut frame: EncodedFrame, sampling: Sampling) -> EncodedFrame {
     if sampling == Sampling::Cs400 && frame.sequence_header.len() >= 3 {
         // AV1's monochrome color_config infers both chroma subsampling flags
         // as one.  rav1e's compact container header may retain the luma-plane
-        // layout (1,0) in lossy mode; the native API must make av1C agree with
+        // layout (1,0) in lossy mode; every API must make av1C agree with
         // the actual sequence header without changing the supplied plane.
         frame.sequence_header[2] |= 0x0c;
     }
@@ -890,11 +889,14 @@ fn encode_planes_with_prediction(
     let frame_payload = packet.ok_or_else(|| {
         EncoderError::NotEnoughData("rav1e produced no AV1 frame packet".to_string())
     })?;
-    Ok(EncodedFrame {
-        sequence_header: context.container_sequence_header().to_vec(),
-        frame_payload,
-        pixel_channels: planes.len() as u8,
-    })
+    Ok(normalize_container_frame(
+        EncodedFrame {
+            sequence_header: context.container_sequence_header().to_vec(),
+            frame_payload,
+            pixel_channels: planes.len() as u8,
+        },
+        sampling,
+    ))
 }
 
 // This builds and validates settings only: no context, threads, frame or samples.

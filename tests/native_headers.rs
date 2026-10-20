@@ -395,3 +395,90 @@ fn native_associations_carry_exact_color_boxes_and_av1c_flags() {
         }
     }
 }
+
+// The AV1 sequence header is the authority for the duplicated av1C fields.
+// Exercise legacy routes too: native encoding already normalized monochrome.
+#[test]
+fn legacy_monochrome_av1c_matches_the_actual_sequence_header() {
+    for bits in [8, 10, 12] {
+        for grayscale in [false, true] {
+            for (quality, quality_alpha) in [(60, 60), (100, 60), (60, 100)] {
+                // Legacy grayscale lossless accepts only implicit channel metadata.
+                if grayscale && quality == 100 {
+                    continue;
+                }
+                let options = EncoderOptions {
+                    quality,
+                    quality_alpha,
+                    speed: 10,
+                    pixel_information: Some(avifenc_rust::PixelInformation {
+                        bits_per_channel: vec![bits; 3],
+                        extended_channels: None,
+                    }),
+                    ..Default::default()
+                };
+                let rgba = (0..4)
+                    .flat_map(|i| {
+                        let gray = 20 + i * 40;
+                        [
+                            gray,
+                            if grayscale { gray } else { 200 - i * 20 },
+                            gray,
+                            100 + i * 30,
+                        ]
+                    })
+                    .collect::<Vec<u8>>();
+                let encoded = if bits == 8 {
+                    avifenc_rust::encode_bytes(
+                        &avifenc_rust::ImageBuffer {
+                            width: 2,
+                            height: 2,
+                            rgba,
+                        },
+                        &options,
+                    )
+                    .unwrap()
+                } else {
+                    avifenc_rust::encode_rgba16_bytes(
+                        &avifenc_rust::Rgba16ImageBuffer {
+                            width: 2,
+                            height: 2,
+                            rgba: rgba.into_iter().map(|v| u16::from(v) * 257).collect(),
+                        },
+                        &options,
+                    )
+                    .unwrap()
+                };
+                let sequences = sequence_payloads(&encoded);
+                assert_eq!(sequences.len(), 2);
+                for (i, payload) in sequences.into_iter().enumerate() {
+                    let sequence = sequence_color(payload);
+                    let record = item_property(&encoded, (i + 1) as u16, b"av1C");
+                    assert_eq!(record[2] & 0x10 != 0, sequence.monochrome);
+                    assert_eq!(record[2] & 0x08 != 0, sequence.subsampling_x);
+                    assert_eq!(
+                        record[2] & 0x04 != 0,
+                        sequence.subsampling_y,
+                        "bits={bits}, grayscale={grayscale}, quality={quality}, alpha={quality_alpha}, item={}",
+                        i + 1
+                    );
+                }
+            }
+        }
+        let mut frame = buffers(NativeSubsampling::Cs400);
+        frame.planes.truncate(1);
+        let options = EncoderOptions {
+            speed: 10,
+            pixel_information: Some(avifenc_rust::PixelInformation {
+                bits_per_channel: vec![bits],
+                extended_channels: None,
+            }),
+            ..Default::default()
+        };
+        let encoded = avifenc_rust::encode_frame_bytes(&frame, &options).unwrap();
+        let sequence = sequence_color(sequence_payloads(&encoded)[0]);
+        let record = item_property(&encoded, 1, b"av1C");
+        assert!(sequence.monochrome);
+        assert_eq!(record[2] & 0x0c, 0x0c, "legacy native frame bits={bits}");
+    }
+}
