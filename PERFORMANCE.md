@@ -44,3 +44,7 @@ The added differential regression compares the former interleaved route with dir
 ## Validation
 
 Default and all-features release suites:95 passed each, 0 failed, 0 ignored. Direct/staged differential regression includes nine dimension/speed cases. Format passes. Strict all-target/all-feature Clippy fails on the same three pre-existing `collapsible_else_if` diagnostics at baseline and after; no lint gate is changed. A separate diagnostic run allowing only that lint finds no other warnings. This repository has no hosted CI workflow.
+
+## Remaining CPU bottleneck
+
+A separate release build with the existing `profile` feature runs the same128×128, quality60, speed10, alpha workload and produces the same encoded-byte hash. Across its three timed calls, median rav1e guard time is1494.750ms (four backend calls: primary/alpha, each base/complete search), RGBA-to-YUV0.079ms and container0.014ms. These diagnostic timings are not mixed into the default-build comparison. Raw guard data are in `performance/encode-lossy-stage-profile.json`. Rav1e search is the measured CPU target for subsequent work; the current search/quality policy is retained.

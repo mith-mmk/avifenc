@@ -1,0 +1,84 @@
+{
+  "production_revision": "6664cb975d755cde670b92ed41d0ac7bfa09ac1c",
+  "command": "cargo build --locked --release --features profile --example performance; target/release/examples/performance 128 128 60 alpha 3",
+  "scope": "Separate diagnostic; not used as before/after timing. Existing profile feature records nested guards. One warmup, three timed, one allocation-only call. Timed-stage medians use middle three calls only.",
+  "default_build_checksum": "9a86591b23b59c69",
+  "profile_build_checksum": "9a86591b23b59c69",
+  "runs": [
+    {
+      "rgba_to_yuv": {
+        "calls": 1,
+        "ms": 0.115
+      },
+      "rav1e_encode": {
+        "calls": 4,
+        "ms": 1487.832
+      },
+      "container": {
+        "calls": 1,
+        "ms": 0.012
+      }
+    },
+    {
+      "rgba_to_yuv": {
+        "calls": 1,
+        "ms": 0.081
+      },
+      "rav1e_encode": {
+        "calls": 4,
+        "ms": 1548.085
+      },
+      "container": {
+        "calls": 1,
+        "ms": 0.012
+      }
+    },
+    {
+      "rgba_to_yuv": {
+        "calls": 1,
+        "ms": 0.077
+      },
+      "rav1e_encode": {
+        "calls": 4,
+        "ms": 1494.363
+      },
+      "container": {
+        "calls": 1,
+        "ms": 0.014
+      }
+    },
+    {
+      "rgba_to_yuv": {
+        "calls": 1,
+        "ms": 0.079
+      },
+      "rav1e_encode": {
+        "calls": 4,
+        "ms": 1494.75
+      },
+      "container": {
+        "calls": 1,
+        "ms": 0.015
+      }
+    },
+    {
+      "rgba_to_yuv": {
+        "calls": 1,
+        "ms": 0.078
+      },
+      "rav1e_encode": {
+        "calls": 4,
+        "ms": 1535.277
+      },
+      "container": {
+        "calls": 1,
+        "ms": 0.014
+      }
+    }
+  ],
+  "median_timed_stage_ms": {
+    "rgba_to_yuv": 0.079,
+    "rav1e_encode": 1494.75,
+    "container": 0.014
+  }
+}
