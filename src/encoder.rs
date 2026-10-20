@@ -805,85 +805,109 @@ fn encode_planes_with_prediction(
     complete_keyframe_search: bool,
 ) -> Result<EncodedFrame, EncoderError> {
     let _timing = Guard::new(Kind::Rav1eEncode);
-    if planes.len() != if sampling == Sampling::Cs400 { 1 } else { 3 } {
-        return Err(EncoderError::InvalidParam(
-            "plane count does not match chroma sampling".to_string(),
-        ));
+    let _variant = Guard::new(if complete_keyframe_search {
+        Kind::Rav1eComplete
+    } else {
+        Kind::Rav1eBase
+    });
+    {
+        let _validation = Guard::new(Kind::Rav1eValidation);
+        if planes.len() != if sampling == Sampling::Cs400 { 1 } else { 3 } {
+            return Err(EncoderError::InvalidParam(
+                "plane count does not match chroma sampling".to_string(),
+            ));
+        }
+        for (index, plane) in planes.iter().enumerate() {
+            let expected = if index == 0 {
+                (width, height)
+            } else {
+                chroma_dimensions(width, height, sampling)
+            };
+            if (plane.width, plane.height) != expected {
+                return Err(EncoderError::InvalidParam(format!(
+                    "plane {index} has {}x{}, expected {}x{}",
+                    plane.width, plane.height, expected.0, expected.1
+                )));
+            }
+            let expected_samples = plane.width.checked_mul(plane.height).ok_or_else(|| {
+                EncoderError::InvalidParam("plane size overflows usize".to_string())
+            })?;
+            if plane.samples.len() != expected_samples {
+                return Err(EncoderError::InvalidParam(format!(
+                    "plane {index} has {} samples, expected {expected_samples}",
+                    plane.samples.len()
+                )));
+            }
+            let max_sample = (1u32 << u32::from(bit_depth)) - 1;
+            if plane
+                .samples
+                .iter()
+                .any(|&sample| u32::from(sample) > max_sample)
+            {
+                return Err(EncoderError::InvalidParam(format!(
+                    "plane {index} contains a sample outside the {bit_depth}-bit range"
+                )));
+            }
+        }
     }
-    for (index, plane) in planes.iter().enumerate() {
-        let expected = if index == 0 {
-            (width, height)
-        } else {
-            chroma_dimensions(width, height, sampling)
-        };
-        if (plane.width, plane.height) != expected {
-            return Err(EncoderError::InvalidParam(format!(
-                "plane {index} has {}x{}, expected {}x{}",
-                plane.width, plane.height, expected.0, expected.1
-            )));
-        }
-        let expected_samples = plane
-            .width
-            .checked_mul(plane.height)
-            .ok_or_else(|| EncoderError::InvalidParam("plane size overflows usize".to_string()))?;
-        if plane.samples.len() != expected_samples {
-            return Err(EncoderError::InvalidParam(format!(
-                "plane {index} has {} samples, expected {expected_samples}",
-                plane.samples.len()
-            )));
-        }
-        let max_sample = (1u32 << u32::from(bit_depth)) - 1;
-        if plane
-            .samples
-            .iter()
-            .any(|&sample| u32::from(sample) > max_sample)
-        {
-            return Err(EncoderError::InvalidParam(format!(
-                "plane {index} contains a sample outside the {bit_depth}-bit range"
-            )));
+    let config = {
+        let _config = Guard::new(Kind::Rav1eConfig);
+        validated_rav1e_config(
+            width,
+            height,
+            sampling,
+            bit_depth,
+            options,
+            complete_keyframe_search,
+        )?
+    };
+    let mut context = {
+        let _context = Guard::new(Kind::Rav1eContext);
+        config
+            .new_context::<u16>()
+            .map_err(|error| EncoderError::InvalidParam(error.to_string()))?
+    };
+    let mut frame = {
+        let _frame = Guard::new(Kind::Rav1eFrame);
+        context.new_frame()
+    };
+    {
+        let _copy = Guard::new(Kind::Rav1eCopy);
+        for (index, plane) in planes.iter().enumerate() {
+            let destination_stride = frame.planes[index].cfg.stride;
+            let destination = frame.planes[index].data_origin_mut();
+            for (destination_row, source_row) in destination
+                .chunks_exact_mut(destination_stride)
+                .take(plane.height)
+                .zip(plane.samples.chunks_exact(plane.width))
+            {
+                destination_row[..plane.width].copy_from_slice(source_row);
+            }
+            // rav1e's plane padding takes the visible luma dimensions and applies
+            // the plane's subsampling internally. Passing the already-subsampled
+            // chroma dimensions leaves the right/bottom edge under-padded for odd
+            // image sizes.
+            frame.planes[index].pad(width, height);
         }
     }
-
-    let config = validated_rav1e_config(
-        width,
-        height,
-        sampling,
-        bit_depth,
-        options,
-        complete_keyframe_search,
-    )?;
-    let mut context = config
-        .new_context::<u16>()
-        .map_err(|error| EncoderError::InvalidParam(error.to_string()))?;
-    let mut frame = context.new_frame();
-    for (index, plane) in planes.iter().enumerate() {
-        let destination_stride = frame.planes[index].cfg.stride;
-        let destination = frame.planes[index].data_origin_mut();
-        for (destination_row, source_row) in destination
-            .chunks_exact_mut(destination_stride)
-            .take(plane.height)
-            .zip(plane.samples.chunks_exact(plane.width))
-        {
-            destination_row[..plane.width].copy_from_slice(source_row);
-        }
-        // rav1e's plane padding takes the visible luma dimensions and applies
-        // the plane's subsampling internally. Passing the already-subsampled
-        // chroma dimensions leaves the right/bottom edge under-padded for odd
-        // image sizes.
-        frame.planes[index].pad(width, height);
+    {
+        let _submit = Guard::new(Kind::Rav1eSubmit);
+        context
+            .send_frame(frame)
+            .map_err(|error| EncoderError::Bitstream(error.to_string()))?;
+        context.flush();
     }
-    context
-        .send_frame(frame)
-        .map_err(|error| EncoderError::Bitstream(error.to_string()))?;
-    context.flush();
 
     let mut packet = None;
-    loop {
-        match context.receive_packet() {
-            Ok(value) => packet = Some(value.data),
-            Err(EncoderStatus::Encoded) => continue,
-            Err(EncoderStatus::LimitReached) => break,
-            Err(error) => return Err(EncoderError::Bitstream(error.to_string())),
+    {
+        let _packets = Guard::new(Kind::Rav1ePackets);
+        loop {
+            match context.receive_packet() {
+                Ok(value) => packet = Some(value.data),
+                Err(EncoderStatus::Encoded) => continue,
+                Err(EncoderStatus::LimitReached) => break,
+                Err(error) => return Err(EncoderError::Bitstream(error.to_string())),
+            }
         }
     }
     let frame_payload = packet.ok_or_else(|| {

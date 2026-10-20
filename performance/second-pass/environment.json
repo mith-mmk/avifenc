@@ -1,0 +1,15 @@
+{
+  "baseline_revision": "008956dc09b52bc793ffa0dc00b5f7cc2f964b5f",
+  "shipped_scope": "Profiling-only guards and benchmark expansion; rejected u8 optimization absent. No dependency, quality/preset or default-feature change.",
+  "source_sha256": {
+    "src/encoder.rs": "f82ab7c1c12260bf745af9c3f354ab46890637c0ddf6716052abba801d847577",
+    "src/profile.rs": "cc6114a413d2051cebc3685e44c5b8b0b5fdca53e99eb98cd43bdf6c6d8b4011",
+    "examples/performance.rs": "376a0d5121686c25b5d7a3dbe094bda8b24e08e551b18c451f141e0cb8d4704d"
+  },
+  "decision_file": "decision.json",
+  "compiler_and_machine": "Same as ../environment.json; release generic target, no custom RUSTFLAGS; no concurrent benchmarks/builds during repeated measurements.",
+  "final_default_binary": {
+    "bytes": 2407792,
+    "sha256": "4d3079310977bd42868b573c0e905699a4a86553076e48fe91fdd1165ead933c"
+  }
+}

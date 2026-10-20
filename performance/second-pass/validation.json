@@ -1,0 +1,30 @@
+{
+  "default": {
+    "passed": 95,
+    "failed": 0,
+    "ignored": 0
+  },
+  "all_features": {
+    "passed": 95,
+    "failed": 0,
+    "ignored": 0
+  },
+  "final_10bit_checksum": "4eb6a8df897ef050",
+  "final_12bit_checksum": "9405c02184995ae9",
+  "format": "passed",
+  "diff_check": "passed",
+  "rejected_patch_apply_check": "passed",
+  "clippy_diagnostic_scope": "passes all targets/all features with only the three pre-existing collapsible_else_if warnings allowed; no source suppressions added",
+  "decoder": "Unchanged d3ea4e602763951626d678291cc9c325e2c475b2; existing exact60frame validation retained",
+  "strict_clippy": {
+    "command": "cargo clippy --locked --all-features --all-targets -- -D warnings",
+    "exit_code": 101,
+    "unchanged_lint": "clippy::collapsible_else_if",
+    "locations": [
+      "src/encoder.rs:1266:12",
+      "src/encoder.rs:1498:12",
+      "src/lossless_tile.rs:2143:20"
+    ],
+    "baseline_evidence": "../validation.json records same three warnings at the preceding implementation baseline; no new source suppression or workflow change."
+  }
+}

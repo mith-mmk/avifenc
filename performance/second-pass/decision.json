@@ -1,0 +1,18 @@
+{
+  "baseline_revision": "008956dc09b52bc793ffa0dc00b5f7cc2f964b5f",
+  "candidate": "8-bit Context<u8>, unchanged Context<u16> at10/12bits; no preset/quality/search change",
+  "decision": "Rejected, not shipped: small timing shifts overlap unchanged controls; increased executable size and small-image RSS. All five measured workloads retain exact encoded-byte hashes.",
+  "binaries": {
+    "baseline": {
+      "bytes": 2407776,
+      "sha256": "96d9c40d36cee0e0ea89391ad1e1778bced3bb5d787242fd23d042643107c191"
+    },
+    "candidate": {
+      "bytes": 2997008,
+      "sha256": "e361ff820e5c50d36565fecb2b62d409c6f033832d4ff293bad02c9a529d5619"
+    }
+  },
+  "candidate_encoder_sha256": "aad4ab4e09e0a45f6e89a763796c4d80d83e3cb43d05ad219651f9cebdbec046",
+  "patch": "rejected-u8-context.patch",
+  "method": "128/64alpha: fivefreshprocesses, nine timedcalls each; odd65x63opaque: fivefreshprocesses, threetimedcalls each;10/12-bitcontrols: threefreshprocesses, threetimedcalls each; alternateAB/BA; one warmup +separateallocationcall; no concurrentbuilds/benchmarks. The enhanced harness preserves original defaults and adds optional depth/speed arguments."
+}

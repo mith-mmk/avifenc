@@ -77,6 +77,9 @@ fn main() {
     let quality: u8 = args[3].parse().unwrap();
     let alpha = args[4] == "alpha";
     let iterations = args.get(5).map_or(7, |s| s.parse().unwrap());
+    let bit_depth: u8 = args.get(6).map_or(8, |s| s.parse().unwrap());
+    let speed: u8 = args.get(7).map_or(10, |s| s.parse().unwrap());
+    assert!(matches!(bit_depth, 8 | 10 | 12));
     let rgba = (0..width * height)
         .flat_map(|i| {
             let x = i % width;
@@ -101,16 +104,33 @@ fn main() {
     let options = avifenc_rust::EncoderOptions {
         quality,
         quality_alpha: quality,
-        speed: 10,
+        speed,
+        pixel_information: (bit_depth != 8).then(|| avifenc_rust::PixelInformation {
+            bits_per_channel: vec![bit_depth; 3],
+            extended_channels: None,
+        }),
         jobs: 0,
         ..Default::default()
     };
     println!(
-        "dimensions={width}x{height} bit_depth=8 quality={quality} quality_alpha={quality} speed=10 jobs=0 alpha={alpha}"
+        "dimensions={width}x{height} bit_depth={bit_depth} quality={quality} quality_alpha={quality} speed={speed} jobs=0 alpha={alpha}"
     );
-    measure(
-        iterations,
-        || avifenc_rust::encode_bytes(&image, &options).unwrap(),
-        |b| hash(b.iter().copied()),
-    );
+    if bit_depth == 8 {
+        measure(
+            iterations,
+            || avifenc_rust::encode_bytes(&image, &options).unwrap(),
+            |b| hash(b.iter().copied()),
+        );
+    } else {
+        let image16 = avifenc_rust::Rgba16ImageBuffer {
+            width,
+            height,
+            rgba: image.rgba.iter().map(|&v| u16::from(v) * 257).collect(),
+        };
+        measure(
+            iterations,
+            || avifenc_rust::encode_rgba16_bytes(&image16, &options).unwrap(),
+            |b| hash(b.iter().copied()),
+        );
+    }
 }
