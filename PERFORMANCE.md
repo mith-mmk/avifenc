@@ -19,10 +19,10 @@ mkdir -p /tmp/encode-baseline
 git archive 13ef4e46b32569d33fece0b4ed29c994754eff2c | tar -x -C /tmp/encode-baseline
 mkdir -p /tmp/encode-baseline/examples
 cp examples/performance.rs /tmp/encode-baseline/examples/
-CARGO_TARGET_DIR=/tmp/encode-build cargo build --locked --release --manifest-path /tmp/encode-baseline/Cargo.toml --example performance
-cp /tmp/encode-build/release/examples/performance /tmp/avif-encode-before
-CARGO_TARGET_DIR=/tmp/encode-build cargo build --locked --release --example performance
-cp /tmp/encode-build/release/examples/performance /tmp/avif-encode-after
+CARGO_TARGET_DIR=/tmp/encode-before-build cargo build --locked --release --manifest-path /tmp/encode-baseline/Cargo.toml --example performance
+cp /tmp/encode-before-build/release/examples/performance /tmp/avif-encode-before
+CARGO_TARGET_DIR=/tmp/encode-after-build cargo build --locked --release --example performance
+cp /tmp/encode-after-build/release/examples/performance /tmp/avif-encode-after
 ```
 
 Then run the comparator with the workload arguments recorded in each JSON file, e.g.:
@@ -31,7 +31,7 @@ Then run the comparator with the workload arguments recorded in each JSON file, 
 python3 scripts/compare-performance.py --before /tmp/avif-encode-before --after /tmp/avif-encode-after --output /tmp/encode.json 256 256 100 alpha 9
 ```
 
-The added differential regression compares the former interleaved route with direct planes at three dimensions and speeds0/6/10, including odd edges. All encoded bytes match in benchmark trials. Lossy encoding is a control workload; its backend and quality choices are unchanged. Remaining candidates include the four per-chroma accumulators in RGBA-to-YUV420 conversion, requiring exact rounding preservation and separate measurement.
+The added differential regression compares the former interleaved route with direct planes at three dimensions and speeds 0/6/10, including odd edges. All encoded bytes match in benchmark trials. Lossy encoding is a control workload; its backend and quality choices are unchanged. Remaining candidates include the four per-chroma accumulators in RGBA-to-YUV420 conversion, requiring exact rounding preservation and separate measurement.
 
 ## Results
 
@@ -127,3 +127,40 @@ The optional existing SIMD backend avoids that maintenance cost and improves mea
 Default, asm and all-features release suites each pass 96 tests, including the frozen 8/10/12-bit bitstreams and existing FFmpeg oracles. The mandatory reference test also passes under all seven CPU caps actually resolved on this host: RUST, SSE2, SSSE3, SSE4_1, AVX2, AVX512 and AVX512ICL. Format and the scoped Clippy diagnostic pass; the three pre-existing collapsible_else_if warnings remain, with no source suppression or weakened gate. New Linux CI covers portable, asm and all-features at MSRV 1.88, runs the mandatory references before full regressions, and installs NASM only for native-feature jobs. CI outcomes are linked in the PR after push. Windows/macOS/aarch64 performance is not measured here.
 
 Decoder code remains at d3ea4e6; no dependency pins or feature forwarding there are changed. Its existing 60-frame exactness evidence remains valid. This encoder feature is enabled explicitly in this checkout; it does not implicitly enable SIMD through the decoder's currently pinned encoder dependency.
+
+## Fourth pass: remove retained RGBA16 RGB staging
+
+Baseline: `f125e0966286304569b75e5ddea6c5a5456ad88f`. The earlier direct-GBR optimization covered RGBA8, while `encode_rgba16_with_lossless_items` still created a scaled interleaved RGB16 vector. It then copied that vector into GBR or gray planes, or did not use it at all when only alpha was lossless. The RGB vector remained alive through primary/alpha encoding and container construction.
+
+This pass scales directly from validated RGBA16 into the final lossless GBR or gray planes; the alpha-only-lossless path no longer constructs unused RGB. It removes one allocation and exactly **6 bytes per pixel** of cumulative allocation requests from affected API calls. Alpha extraction/association, full-range integer rounding, all source validations, quality, speed, metadata and backend choice are preserved. It adds no feature, dependency, fork or public API. Default Pure Rust and optional asm remain as before; versions are unchanged.
+
+### Measurements
+
+Compare default-before/default-after and asm-before/asm-after independently. Separate Cargo target directories are used for each source checkout to prevent shared-output cache confusion; initial shared-target probes were discarded before retained trials. All measurements below use isolated fresh release artifacts and the identical enhanced harness. Five process pairs alternate AB/BA, with one warmup and a separate allocation-only call. The two 1024 cases use 9 timed calls,512/128lossless cases 5, others 3. No concurrent builds or benchmarks ran during timing. Per-case environment variables and exact arguments are in environment.json and individual JSON files. All eight cases retain identical complete encoded-output hashes.
+
+| Workload | Median ms | Cumulative requested bytes | Peak RSS KiB |
+|---|---:|---:|---:|
+| portable-1024-flat12-alpha | 85.240 → 81.699 | 74,316,653 → 68,025,197 | 37,768 → 31,496 |
+| asm-1024-flat12-alpha | 82.168 → 77.588 | 74,316,653 → 68,025,197 | 37,792 → 31,780 |
+| portable-512-flat10-opaque | 18.257 → 17.629 | 17,073,240 → 15,500,376 | 11,432 → 9,756 |
+| asm-128-procedural10-alpha | 92.844 → 84.572 | 6,141,555 → 6,043,251 | 3,272 → 3,272 |
+| asm-64-primary60-alpha100-12bit | 109.035 → 104.426 | 9,940,045 → 9,915,469 | 5,672 → 5,764 |
+| portable-64-primary100-alpha60-8bit | 249.785 → 250.132 | 31,436,624 → 31,412,048 | 4,820 → 4,700 |
+| asm-128-lossy8-control | 788.388 → 793.586 | 19,216,147 → 19,216,147 | 5,816 → 5,824 |
+| portable-64-lossy12-control | 404.372 → 395.816 | 53,268,575 → 53,268,575 | 4,996 → 5,016 |
+
+1024×1024, 12-bit, alpha, quality 100 primary/alpha, speed 10 reduces portable peak RSS 37,768→31,496 KiB (~16.6%), and asm-build peak 37,792→31,780 KiB (~15.9%). The requested-byte delta is exactly 6,291,456 bytes (6 MiB). Portable time 85.240→81.699 ms and asm-build time 82.168→77.588 ms are measured medians; these lossless items use the private backend even when the optional asm feature is built. Smaller cases can have unchanged/noisy RSS, so the peak-memory claim is scoped to these larger representative memory workloads.
+
+The mixed item cases exercise color 100/alpha 60 and color 60/alpha 100. Their output depths are explicitly 8/12 bits, using RGBA16 input; the 10-bit procedural case covers nonflat fully lossless data and the 10-bit opaque case covers no-alpha output. Lossy-only controls are unaffected by this path: allocation counts/bytes and hashes are identical. The normal 8-bit asm lossy control 788.388→793.586 ms (~0.7%) remains within timing variation; its existing SIMD improvement is retained. No speed gain is claimed for controls.
+
+Binary size does not grow: portable 2,411,512→2,411,416 bytes and asm 4,159,944→4,158,880 bytes. There is no new native-tool requirement beyond the existing opt-in asm feature. The test-only former interleaved helper remains as a differential oracle, not shipping code.
+
+### Reproduce and verify
+
+Archive f125e09 and copy the current examples/performance.rs into its examples directory. Build baseline default/asm under one target directory exclusive to the archive, and current default/asm under a different target directory exclusive to the working checkout. Save each executable separately before comparing. Do not share a Cargo target directory between checkouts with the same package name/version. The two source fingerprints and four binary SHA256/size values are in environment.json.
+
+For example, run the comparator with `AVIF_PERF_RGBA16=1 AVIF_PERF_PATTERN=flat` and arguments `1024 1024 100 alpha 9 12`, using before/after binaries with the same feature set. `AVIF_PERF_RGBA16` forces the RGBA16 entry point even at 8-bit output; it also sets explicit depth metadata. `AVIF_PERF_ALPHA_QUALITY` overrides only the benchmark's alpha quality for mixed-item cases (same value before/after). `AVIF_PERF_PATTERN=flat` generates a constant colored image with alpha 128 or 255, while the default procedural pattern and existing raw-input option are unchanged. These are benchmark inputs/settings, not changes to production presets.
+
+The committed reference-generator.rs runs only against the immutable baseline to produce 14 complete AVIF references: 8/10/12-bit color, lossless primary and/or alpha, opaque output and 12-bit grayscale. Baseline portable/asm generations match byte-for-byte. Tests compare full bytes with no external-tool or fixture skip. A separate direct/helper differential test covers 27 dimension/depth/speed combinations, including odd edges, full u16 input precision and speeds 0/6/10. Existing preflight, lossless limits, native headers and independent FFmpeg regressions remain required.
+
+Default, asm and all-features release regression suites each pass **98 tests**, 0 failures/ignored. New required CI references include both the existing SIMD fixtures and 14 RGBA16 staging cases before full regressions. Format and scoped Clippy pass; strict Clippy still reports exactly the same three pre-existing collapsible_else_if warnings. CI outcomes are linked in the PR. Decoder remains unchanged at d3ea4e6.

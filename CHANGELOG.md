@@ -2,6 +2,9 @@
 
 ## 0.1.0 - Unreleased
 
+- Remove retained interleaved RGB16 staging from mixed/lossless RGBA16 paths;
+  preserve encoded bytes while saving six allocated bytes per input pixel.
+
 - Add opt-in `asm` forwarding to rav1e's native SIMD, with correct 8-bit
   pixel storage; keep portable defaults and all quality/search presets.
 - Add frozen portable 8/10/12-bit bitstream oracles and SIMD performance

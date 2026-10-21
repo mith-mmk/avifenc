@@ -1,0 +1,37 @@
+{
+  "default": {
+    "passed": 98,
+    "failed": 0,
+    "ignored": 0
+  },
+  "asm": {
+    "passed": 98,
+    "failed": 0,
+    "ignored": 0
+  },
+  "all": {
+    "passed": 98,
+    "failed": 0,
+    "ignored": 0
+  },
+  "fixture_cases": 14,
+  "differential_cases": 27,
+  "baseline_portable_and_asm_fixtures": "identical",
+  "paired_workloads": 8,
+  "all_output_hashes": "match",
+  "allocation_reduction": "exactly6bytes/pixel,oneallocation inaffectedcases;controlsunchanged",
+  "format": "passed",
+  "diff_check": "passed",
+  "strict_clippy": {
+    "exit": 101,
+    "preexisting_lint": "collapsible_else_if",
+    "locations": [
+      "src/encoder.rs:1289:12",
+      "src/encoder.rs:1517:12",
+      "src/lossless_tile.rs:2143:20"
+    ],
+    "scoped_diagnostic": "passes allowing only this existing lint; no source suppression added"
+  },
+  "features_dependencies_presets": "unchanged",
+  "decoder": "unchanged d3ea4e6"
+}

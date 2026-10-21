@@ -1,0 +1,87 @@
+{
+  "baseline_revision": "f125e0966286304569b75e5ddea6c5a5456ad88f",
+  "platform": "Linux-6.18.55-x86_64-with-glibc2.41",
+  "cpu": "AMD EPYC 9V74 80-Core Processor",
+  "compiler": "rustc 1.91.0 (f8297e351 2025-10-28)\nbinary: rustc\ncommit-hash: f8297e351a40c1439a467bbbb6879088047f50b3\ncommit-date: 2025-10-28\nhost: x86_64-unknown-linux-gnu\nrelease: 1.91.0\nLLVM version: 21.1.2\n",
+  "rustflags": "",
+  "builds": {
+    "before_target": "/tmp/perf4-baseline-target",
+    "after_target": "/tmp/perf4-after-target",
+    "features": [
+      "default",
+      "asm only"
+    ],
+    "isolation": "Independent target directories per source checkout. Earlier shared-target exploratory artifacts were discarded. Retained trials use independently rebuilt artifacts with verified6bytes/pixel allocation deltas."
+  },
+  "binaries": {
+    "before-portable": {
+      "bytes": 2411512,
+      "sha256": "0b84485911934b74ecbeb062530334280dad1bfafcab1501b897652f3e55a322"
+    },
+    "after-portable": {
+      "bytes": 2411416,
+      "sha256": "c948c84d07df9231b4a2e315a277090dd7f9129fe2fd5dcaccc6728780e045dc"
+    },
+    "before-asm": {
+      "bytes": 4159944,
+      "sha256": "1cd6e9269149ed9e7cbffb2d3300578ed9799bad6b3efe70c8348b7880926ea9"
+    },
+    "after-asm": {
+      "bytes": 4158880,
+      "sha256": "31e1cde418d551acd7b19f2251eddfc066a8294220e123bc48c50c5fea5de2e9"
+    }
+  },
+  "case_environment": {
+    "portable-1024-flat12-alpha": {
+      "AVIF_PERF_RGBA16": "1",
+      "AVIF_PERF_PATTERN": "flat"
+    },
+    "asm-1024-flat12-alpha": {
+      "AVIF_PERF_RGBA16": "1",
+      "AVIF_PERF_PATTERN": "flat"
+    },
+    "portable-512-flat10-opaque": {
+      "AVIF_PERF_RGBA16": "1",
+      "AVIF_PERF_PATTERN": "flat"
+    },
+    "asm-128-procedural10-alpha": {
+      "AVIF_PERF_RGBA16": "1"
+    },
+    "asm-64-primary60-alpha100-12bit": {
+      "AVIF_PERF_RGBA16": "1",
+      "AVIF_PERF_ALPHA_QUALITY": "100"
+    },
+    "portable-64-primary100-alpha60-8bit": {
+      "AVIF_PERF_RGBA16": "1",
+      "AVIF_PERF_ALPHA_QUALITY": "60"
+    },
+    "asm-128-lossy8-control": {},
+    "portable-64-lossy12-control": {}
+  },
+  "repetitions": "Five fresh processpairs, alternatingAB/BA;9timedcalls for1024flat cases,5for512flat and128procedural lossless,3forother cases;1warmup+separateallocation-onlycall;no concurrent builds/benchmarks during timings.",
+  "timing": "APIcall+output construction; excludes input preparation, checksum and output destruction; same counter wrapper disabled during timed calls.",
+  "memory": "Linux process VmHWM incl setup/warmup and retainedpages;KiB. Cumulative requested allocation bytes include full realloc sizes, not peak/liveheap.",
+  "source_sha256": {
+    "src/encoder.rs": "773fcf0a5b3a95b3287331c6a7bbdbd7a47fb3bcd798c46a1080fe37a9a893b8",
+    "examples/performance.rs": "ef6f843301a227b0afb5fc427a621f6cb2d36a8ee851c314921da8e4e3a1c98a",
+    "tests/rgba16_staging.rs": "497bf3e366d50bf7a193e90bbc16aa989d33d4caeba1c4d53fa3a22a73afcf1f"
+  },
+  "frozen_fixture_sha256": {
+    "rgba16-8-60-100-alpha.avif": "013006255cbf7f575d0a78fa47559d66ed31baceba90246bc02a5580b8e8d03f",
+    "rgba16-10-100-60-alpha.avif": "f76e3952fbd5709547f41ab2f1fe4d1c0d1da50b5dce17bfb17023ed0a6bdad3",
+    "rgba16-8-100-100-opaque.avif": "f40f92bb7f83bf3cea3941a64e49a48b04d9b7223b7fca3c390132b02b7d283b",
+    "rgba16-12-100-100-alpha.avif": "cccbbacb38302ee7362f9ea16d0de87da9d833fbf7a952767e92022a8ebdf581",
+    "rgba16-8-100-100-alpha.avif": "5205dd2f65585296a4b93b8bfd132072c6ba5c2013841d685266d44c0955e25a",
+    "rgba16-10-60-100-alpha.avif": "693bd7c9afb7f103f0781b29c95103f1f206f002457b5b34d02db0a5fb5e4947",
+    "rgba16-12-100-60-alpha.avif": "64ab6712eb145da2b4e41c8451248eee373cbf273df2132878cd1e32151016e5",
+    "rgba16-10-100-100-opaque.avif": "67d6214617346016c0be6e30edc2472f1b3288d90a4ca22ad5002ba1c9f54253",
+    "rgba16-12-100-100-opaque.avif": "dd480422e8c24e34e8c28f5d84274ac0cd409e955733d5740ce39c5cc27f4a0d",
+    "rgba16-10-100-100-alpha.avif": "fa33c72ed5a95369413144dcb2d4e76c45d9957970f882ca0284f753fa3965b4",
+    "rgba16-gray12-opaque.avif": "cf5a3a10b66649e0f3e17d4d4907058a127316bed690e1606acfba7aa9240866",
+    "rgba16-12-60-100-alpha.avif": "e23b92bb19dbcf73919347a93356a57f6484474e2e49b18a304c62a770d76a9f",
+    "rgba16-gray12-alpha.avif": "f1d90a397135520cc17a1c4d068d688c94bbe3e2bc4c7150606a01e989a560a4",
+    "rgba16-8-100-60-alpha.avif": "ba2db9fc9d7c8c7632f469ee1ff9ddd1d50f71729f9e71eeb1a8e1060280801a"
+  },
+  "fixture_generation": "reference-generator.rs copied into immutable f125e09 baseline examples; default and ASM generation produce14identical AVIFs. Test never regenerates or skips.",
+  "nasm_version": "2.16.03 temporary/tmp tool; source SHA verified against third-pass environment.json; no dependency or feature changes."
+}

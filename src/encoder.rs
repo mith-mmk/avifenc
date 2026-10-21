@@ -1482,15 +1482,10 @@ fn encode_rgba16_with_lossless_items(
     alpha_lossless: bool,
 ) -> Result<Vec<u8>, EncoderError> {
     let max = ((1u32 << u32::from(bit_depth)) - 1) as u16;
-    let mut rgb = Vec::with_capacity(image.rgba.len().saturating_sub(image.rgba.len() / 4));
     let mut alpha_samples = Vec::with_capacity(image.rgba.len() / 4);
     let mut has_alpha = false;
     for pixel in image.rgba.chunks_exact(4) {
-        let red = scale_u16(pixel[0], u32::from(max)) as u16;
-        let green = scale_u16(pixel[1], u32::from(max)) as u16;
-        let blue = scale_u16(pixel[2], u32::from(max)) as u16;
         let alpha = scale_u16(pixel[3], u32::from(max)) as u16;
-        rgb.extend_from_slice(&[red, green, blue]);
         alpha_samples.push(alpha);
         has_alpha |= alpha != max;
     }
@@ -1510,19 +1505,21 @@ fn encode_rgba16_with_lossless_items(
         .map_err(|_| EncoderError::InvalidParam("image height exceeds u32".to_string()))?;
     let primary = if color_lossless {
         if grayscale {
-            let gray = rgb
-                .chunks_exact(3)
-                .map(|pixel| pixel[0])
+            let gray = image
+                .rgba
+                .chunks_exact(4)
+                .map(|pixel| scale_u16(pixel[0], u32::from(max)) as u16)
                 .collect::<Vec<_>>();
             encode_lossless_gray_samples(width, height, &gray, bit_depth, options.speed)?
         } else {
-            encode_gamut_lossless_samples(width, height, &rgb, bit_depth, options.speed)?
+            encode_rgba16_rgb_lossless(image, width, height, bit_depth, options.speed)?
         }
     } else {
         if grayscale {
-            let gray = rgb
-                .chunks_exact(3)
-                .map(|pixel| pixel[0])
+            let gray = image
+                .rgba
+                .chunks_exact(4)
+                .map(|pixel| scale_u16(pixel[0], u32::from(max)) as u16)
                 .collect::<Vec<_>>();
             let planes = [PlaneInput {
                 samples: &gray,
@@ -1720,6 +1717,29 @@ fn encode_lossless_native_full(
     write_avif(buffers.width, buffers.height, &primary, None, &effective)
 }
 
+// Public RGBA16 validation and lossless-option checks precede this helper.
+// Scale directly into final GBR planes without retaining interleaved RGB.
+fn encode_rgba16_rgb_lossless(
+    image: &Rgba16ImageBuffer,
+    width: u32,
+    height: u32,
+    bit_depth: u8,
+    speed: u8,
+) -> Result<EncodedFrame, EncoderError> {
+    let max = (1u32 << u32::from(bit_depth)) - 1;
+    let count = image.rgba.len() / 4;
+    let mut g = Vec::with_capacity(count);
+    let mut b = Vec::with_capacity(count);
+    let mut r = Vec::with_capacity(count);
+    for pixel in image.rgba.chunks_exact(4) {
+        r.push(scale_u16(pixel[0], max) as u16);
+        g.push(scale_u16(pixel[1], max) as u16);
+        b.push(scale_u16(pixel[2], max) as u16);
+    }
+    encode_lossless_gbr_planes(width, height, bit_depth, [&g, &b, &r], speed)
+}
+
+#[cfg(test)]
 fn encode_gamut_lossless_samples(
     width: u32,
     height: u32,
@@ -2771,6 +2791,55 @@ mod rgba8_planar_lossless_tests {
                     "{width}x{height} speed{speed}"
                 );
                 assert_eq!(direct.pixel_channels, staged.pixel_channels);
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod rgba16_staging_tests {
+    use super::*;
+    #[test]
+    fn direct_scaled_gbr_matches_former_interleaved_route() {
+        for (width, height) in [(1, 1), (5, 3), (17, 9)] {
+            let image = Rgba16ImageBuffer {
+                width,
+                height,
+                rgba: (0..width * height * 4)
+                    .map(|i| (i as u16).wrapping_mul(4253).wrapping_add(17))
+                    .collect(),
+            };
+            for bits in [8, 10, 12] {
+                let max = (1u32 << bits) - 1;
+                let rgb: Vec<u16> = image
+                    .rgba
+                    .chunks_exact(4)
+                    .flat_map(|p| p[..3].iter().map(|&v| scale_u16(v, max) as u16))
+                    .collect();
+                for speed in [0, 6, 10] {
+                    let direct = encode_rgba16_rgb_lossless(
+                        &image,
+                        width as u32,
+                        height as u32,
+                        bits,
+                        speed,
+                    )
+                    .unwrap();
+                    let former = encode_gamut_lossless_samples(
+                        width as u32,
+                        height as u32,
+                        &rgb,
+                        bits,
+                        speed,
+                    )
+                    .unwrap();
+                    assert_eq!(direct.sequence_header, former.sequence_header);
+                    assert_eq!(
+                        direct.frame_payload, former.frame_payload,
+                        "{width}x{height} {bits}bit speed{speed}"
+                    );
+                    assert_eq!(direct.pixel_channels, former.pixel_channels);
+                }
             }
         }
     }

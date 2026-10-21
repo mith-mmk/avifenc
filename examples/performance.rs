@@ -80,10 +80,17 @@ fn main() {
     let bit_depth: u8 = args.get(6).map_or(8, |s| s.parse().unwrap());
     let speed: u8 = args.get(7).map_or(10, |s| s.parse().unwrap());
     assert!(matches!(bit_depth, 8 | 10 | 12));
+    let pattern = std::env::var("AVIF_PERF_PATTERN").unwrap_or_else(|_| "procedural".into());
+    let force_rgba16 = std::env::var_os("AVIF_PERF_RGBA16").is_some();
+    let quality_alpha =
+        std::env::var("AVIF_PERF_ALPHA_QUALITY").map_or(quality, |v| v.parse().unwrap());
     let generated = (0..width * height)
         .flat_map(|i| {
             let x = i % width;
             let y = i / width;
+            if pattern == "flat" {
+                return [48, 96, 192, if alpha { 128 } else { 255 }];
+            }
             [
                 ((x * 7 + y * 3) % 256) as u8,
                 ((x * 2 + y * 11) % 256) as u8,
@@ -108,20 +115,22 @@ fn main() {
     };
     let options = avifenc_rust::EncoderOptions {
         quality,
-        quality_alpha: quality,
+        quality_alpha,
         speed,
-        pixel_information: (bit_depth != 8).then(|| avifenc_rust::PixelInformation {
-            bits_per_channel: vec![bit_depth; 3],
-            extended_channels: None,
+        pixel_information: (bit_depth != 8 || force_rgba16).then(|| {
+            avifenc_rust::PixelInformation {
+                bits_per_channel: vec![bit_depth; 3],
+                extended_channels: None,
+            }
         }),
         jobs: 0,
         ..Default::default()
     };
     println!(
-        "dimensions={width}x{height} bit_depth={bit_depth} quality={quality} quality_alpha={quality} speed={speed} jobs=0 alpha={alpha} input={}",
+        "dimensions={width}x{height} bit_depth={bit_depth} quality={quality} quality_alpha={quality_alpha} speed={speed} jobs=0 alpha={alpha} rgba16={force_rgba16} pattern={pattern} input={}",
         input.as_deref().unwrap_or("procedural")
     );
-    if bit_depth == 8 {
+    if bit_depth == 8 && !force_rgba16 {
         measure(
             iterations,
             || avifenc_rust::encode_bytes(&image, &options).unwrap(),

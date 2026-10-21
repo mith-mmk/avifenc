@@ -39,8 +39,8 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y nasm
           nasm --version
-      - name: Required portable bitstream references (8/10/12 bit)
-        run: cargo test --locked --release --features "${{ matrix.features }}" --test simd_output
+      - name: Required bitstream references (8/10/12 bit and RGBA16 items)
+        run: cargo test --locked --release --features "${{ matrix.features }}" --test simd_output --test rgba16_staging
       - name: Full regressions
         run: cargo test --locked --release --features "${{ matrix.features }}"
       - name: Format
