@@ -1,0 +1,35 @@
+name: lossless regression
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: lossless (${{ matrix.rust }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        rust: [stable, '1.88.0']
+    env:
+      AVIF_REQUIRE_FFMPEG: '1'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ matrix.rust }}
+          components: rustfmt
+      - uses: Swatinem/rust-cache@v2
+      - name: Verify independent decoder availability
+        run: ffmpeg -version
+      - name: Required rectangular syntax and pixel oracles
+        run: cargo test --locked --release --all-features --lib rectangular_leaf
+      - name: Full regressions
+        run: cargo test --locked --release --all-features
+      - name: Format
+        if: matrix.rust == 'stable'
+        run: cargo fmt --all -- --check
