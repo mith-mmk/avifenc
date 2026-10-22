@@ -1,2 +1,3 @@
 performance/third-pass/*.rgba binary
 tests/fixtures/*.avif binary
+tests/fixtures/*.obu binary

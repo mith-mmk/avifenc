@@ -1,0 +1,68 @@
+name: lossless regression
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: lossless (${{ matrix.rust }})
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        rust: [stable, '1.88.0']
+    env:
+      AVIF_REQUIRE_FFMPEG: '1'
+      FFMPEG_REV: c6bb22dea018fbf753b70c592a1e346b9a24f074
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ matrix.rust }}
+          components: rustfmt
+      - uses: Swatinem/rust-cache@v2
+      # Ubuntu's FFmpeg 6.1 does not expose AVIF auxiliary alpha streams.
+      # Keep the existing alpha oracles enabled with the tested upstream pin.
+      - name: Install independent decoder libraries on the CI runner
+        run: |
+          sudo apt-get update
+          sudo apt-get install --no-install-recommends -y libaom-dev libdav1d-dev pkg-config nasm
+      - uses: actions/cache@v4
+        id: ffmpeg
+        with:
+          path: ${{ runner.temp }}/ffmpeg-avif
+          key: ${{ runner.os }}-${{ runner.arch }}-ffmpeg-${{ env.FFMPEG_REV }}-avif-v1
+      - name: Build pinned upstream FFmpeg with AVIF alpha support
+        if: steps.ffmpeg.outputs.cache-hit != 'true'
+        run: |
+          git init "$RUNNER_TEMP/ffmpeg-src"
+          git -C "$RUNNER_TEMP/ffmpeg-src" remote add origin https://github.com/FFmpeg/FFmpeg.git
+          git -C "$RUNNER_TEMP/ffmpeg-src" fetch --depth 1 origin "$FFMPEG_REV"
+          git -C "$RUNNER_TEMP/ffmpeg-src" checkout --detach FETCH_HEAD
+          cd "$RUNNER_TEMP/ffmpeg-src"
+          test "$(git rev-parse HEAD)" = "$FFMPEG_REV"
+          ./configure --prefix="$RUNNER_TEMP/ffmpeg-avif" \
+            --disable-everything --disable-autodetect --disable-doc --disable-debug \
+            --disable-network --disable-x86asm --enable-ffmpeg --enable-ffprobe \
+            --enable-libdav1d --enable-libaom --enable-swscale --enable-avfilter \
+            --enable-protocol=file,pipe --enable-demuxer=mov,obu --enable-muxer=rawvideo \
+            --enable-parser=av1 --enable-decoder=libdav1d,libaom_av1 --enable-encoder=rawvideo \
+            --enable-bsf=av1_frame_merge,av1_frame_split,extract_extradata \
+            --enable-filter=buffer,buffersink,format,scale,null
+          make -j2
+          make install
+      - name: Select pinned FFmpeg
+        run: echo "$RUNNER_TEMP/ffmpeg-avif/bin" >> "$GITHUB_PATH"
+      - name: Verify independent decoder availability
+        run: ffmpeg -version
+      - name: Required rectangular syntax and pixel oracles
+        run: cargo test --locked --release --all-features --lib rectangular_leaf
+      - name: Full regressions
+        run: cargo test --locked --release --all-features
+      - name: Format
+        if: matrix.rust == 'stable'
+        run: cargo fmt --all -- --check
