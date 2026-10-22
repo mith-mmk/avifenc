@@ -24,6 +24,10 @@ jobs:
           toolchain: ${{ matrix.rust }}
           components: rustfmt
       - uses: Swatinem/rust-cache@v2
+      - name: Install independent decoders on the CI runner
+        run: |
+          sudo apt-get update
+          sudo apt-get install --no-install-recommends -y ffmpeg
       - name: Verify independent decoder availability
         run: ffmpeg -version
       - name: Required rectangular syntax and pixel oracles
