@@ -8,7 +8,7 @@ keywords = ["avif", "av1", "image", "encoder", "codec"]
 categories = ["multimedia::images", "encoding"]
 license = "MIT"
 repository = "https://github.com/mith-mmk/avifenc.git"
-include = ["/src/**", "/tests/**", "/README.md", "/README.ja.md", "/CHANGELOG.md", "/LICENSE"]
+include = ["/src/**", "/tests/**", "/README.md", "/README.ja.md", "/CHANGELOG.md", "/SHARED_BUFFER.md", "/PERFORMANCE.md", "/INTEGRATION-0.1.2.md", "/LICENSE"]
 
 [features]
 default = []

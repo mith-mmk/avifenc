@@ -2,8 +2,9 @@
 
 Pure Rust AVIF エンコーダーです。
 
-公開済み版は `avifenc-rust 0.0.7` です。このブランチは共有バッファ対応の
-未公開候補 `0.1.0` を準備しています。依存指定と公開順は
+0.1.2では矩形lossless構文とmonochromeヘッダーを修正し、任意のSIMDと
+lossless経路の確保削減を追加しました。公開API・既定設定・Rust 1.88は維持し、
+共有bufferは公開済み0.1.0を使用します。依存指定は
 [SHARED_BUFFER.md](SHARED_BUFFER.md)、API の説明は [README.md](README.md)
 を参照してください。
 

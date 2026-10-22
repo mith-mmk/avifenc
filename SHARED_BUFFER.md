@@ -1,10 +1,10 @@
 # Shared-buffer encode integration
 
-`avifenc_rust::buffer` reexports the initial `avif-image-buffer` package (0.1.0 candidate, not yet published)
+`avifenc_rust::buffer` reexports the published `avif-image-buffer` 0.1.0 package
 from avif-rust Git commit `5c73c7f26c276098ddd761fb20b956302a462001`.
 This selects the buffer package only, not the decoder crate. The encoder must
 not depend on avif-rust: optional avif encode delegation points in this direction.
-No package/repository publication is included.
+Encoder 0.1.2 retains this shared model and is published before decoder 0.1.2.
 
 `ImageBuffer`, `Rgba16ImageBuffer` and `FrameBuffers` keep their public fields,
 signatures and old encode entry points. Additive `view_ex` methods validate
@@ -29,6 +29,11 @@ The native writer's alpha `auxl` direction is corrected from primary->alpha to
 alpha->primary. This intentionally changes those two item-reference bytes in
 legacy encoded outputs too; old public APIs and sample conversion policies are
 unchanged. Container regression expectations now require the standard direction.
+
+## Historical 0.1.0 integration checkpoint
+
+The following records the earlier preparation, not the current release status.
+Current combined regression results are in INTEGRATION-0.1.2.md.
 
 Verification checkpoint (Rust/Cargo1.91.0, Linux, offline after Git source fetch):
 

@@ -4,8 +4,10 @@
 # avifenc-rust
 
 Pure Rust AVIF still-image encoding backed by the Rust `rav1e` AV1 encoder.
-The published release is `avifenc-rust 0.0.7`. This branch prepares the
-unpublished 0.1.0 shared-buffer integration candidate; see [distribution notes](SHARED_BUFFER.md).
+Version 0.1.2 fixes rectangular lossless syntax and monochrome headers, adds
+optional SIMD, and reduces lossless staging allocations. Public APIs, portable
+defaults and Rust 1.88 remain unchanged; the shared buffer stays at published
+0.1.0. See [the changelog](CHANGELOG.md) and [distribution notes](SHARED_BUFFER.md).
 
 The public vocabulary follows `avif-rust`: use `ImageBuffer` and
 `Rgba16ImageBuffer` for RGBA input, `FrameBuffers` for native YUV input,
