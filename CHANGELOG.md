@@ -1,19 +1,28 @@
 # Changelog
 
-## 0.1.0 - Unreleased
+## 0.1.2 - 2026-10-22
 
-- Remove retained interleaved RGB16 staging from mixed/lossless RGBA16 paths;
-  preserve encoded bytes while saving six allocated bytes per input pixel.
+- Fix terminal HORZ/VERT rectangular partition syntax and rectangular palette
+  presence/context signaling, including 12-bit lossless streams rejected by
+  independent decoders. Corrected encoded bytes intentionally differ from
+  affected 0.1.0 output; valid native sample values are preserved exactly.
+- Normalize monochrome av1C subsampling to match sequence headers across native,
+  RGBA/RGBA16, primary and alpha encoding routes.
+- Add opt-in `asm` for rav1e native SIMD, selecting u8 storage for 8-bit kernels
+  and u16 for higher depths. Portable defaults and quality/search presets stay
+  unchanged. x86 asm builds require NASM and native build tools.
+- Remove redundant RGBA8/RGBA16 lossless staging; affected RGBA16 paths save one
+  allocation and six requested bytes per pixel while preserving output bytes
+  aside from the independent syntax/header corrections above.
+- Preserve public APIs, MSRV Rust 1.88 and shared avif-image-buffer 0.1.0.
+- Package source and synthetic regression fixtures; exclude benchmark input
+  data and measurement artifacts from the published archive.
 
-- Add opt-in `asm` forwarding to rav1e's native SIMD, with correct 8-bit
-  pixel storage; keep portable defaults and all quality/search presets.
-- Add frozen portable 8/10/12-bit bitstream oracles and SIMD performance
-  comparisons with explicit native-build, executable-size and RSS tradeoffs.
+## 0.1.0 - 2026-10-17
 
 - Add shared image-buffer views and explicit precision/color encode preflight.
 - Correct alpha auxiliary references to point from alpha to primary.
-- Prepare versioned shared-buffer registry dependency and package metadata.
-- This candidate has not been published; publish shared 0.1.0 first.
+- Publish versioned shared-buffer registry dependency and package metadata.
 
 ## 0.0.7 - 2026-08-31
 
