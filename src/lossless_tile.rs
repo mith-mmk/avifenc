@@ -1554,17 +1554,10 @@ impl<'a> FrameEncoder<'a> {
         }
     }
 
-    /// Emits the implicit leaf partition for a rectangular child of a
-    /// HORZ/VERT split. Rectangular blocks still carry PARTITION_NONE when
-    /// both edges are available; the partition CDF is selected by the
-    /// child's width, as required by AV1's `BlockSize::width_mi_log2`.
+    /// HORZ/VERT children are terminal blocks, not recursive partitions.
+    /// The parent signals the partition and updates its context once; a
+    /// child must proceed directly to block syntax without PARTITION_NONE.
     fn encode_rectangular_none(&mut self, r: usize, c: usize, bw: usize, bh: usize) {
-        if bw >= 8 && bh >= 8 {
-            let bsl = (bw / 4).trailing_zeros() as usize;
-            let ctx = self.partition_ctx(r, c, bsl);
-            self.sym.encode_symbol(0, partition_cdf(bsl, ctx));
-            self.update_partition_ctx_shape(r, c, bw, bh, bw, bh);
-        }
         self.encode_block_shape(r, c, bw, bh);
     }
 
@@ -2006,8 +1999,10 @@ impl<'a> FrameEncoder<'a> {
         // Palette syntax is present only when screen-content tools are enabled.
         // The frame-level flag is gated by a source scan so ordinary color
         // images do not pay the per-block has_palette signaling cost.
-        if self.screen_content_tools && bw == bh && bw >= 8 {
-            let block_size_context = palette_block_size_context(bw);
+        // Rectangular DC blocks also carry the presence bits, even when no
+        // palette was selected. The size context uses the block's area.
+        if self.screen_content_tools && bw >= 8 && bh >= 8 {
+            let block_size_context = palette_block_size_context(bw, bh);
             let palette_context = self.palette_context(r, c);
             if y_mode == DC_PRED {
                 let has_palette = has_luma_palette;
@@ -4706,8 +4701,10 @@ impl<'a> FrameEncoder<'a> {
     }
 }
 
-fn palette_block_size_context(bw: usize) -> usize {
-    (2 * bw.ilog2() as usize).saturating_sub(6).min(6)
+fn palette_block_size_context(bw: usize, bh: usize) -> usize {
+    (bw.ilog2() as usize + bh.ilog2() as usize)
+        .saturating_sub(6)
+        .min(6)
 }
 
 fn encode_ns(sym: &mut AdaptiveSymbolEncoder, value: usize, n: usize) {
@@ -4992,6 +4989,209 @@ fn golomb(sym: &mut AdaptiveSymbolEncoder, x: u32) {
 mod tests {
     use super::*;
     use crate::lossless_types::LosslessPlanes;
+
+    // Force both rectangular leaf shapes rather than depending on the RDO
+    // heuristic to select them for a particular image or speed preset.
+    fn rectangular_leaf_stream(depth: u8, vertical: bool, screen_tools: bool) -> Vec<u8> {
+        use crate::lossless_headers as headers;
+        let max = (1u32 << depth) - 1;
+        let samples: [Vec<u16>; 3] = std::array::from_fn(|plane| {
+            (0..256)
+                .map(|i| {
+                    let x = i % 16;
+                    let y = i / 16;
+                    ((x * (37 + plane * 11) + y * (19 + plane * 7) + plane * 29) as u32 * max
+                        / 2047) as u16
+                })
+                .collect()
+        });
+        let planes = LosslessPlanes {
+            width: 16,
+            height: 16,
+            bit_depth: depth,
+            monochrome: false,
+            subsampling_x: 0,
+            subsampling_y: 0,
+            color_primaries: 1,
+            transfer_characteristics: 13,
+            matrix_coefficients: 0,
+            full_range: true,
+            planes: samples.iter().map(Vec::as_slice).collect(),
+        };
+        let mut encoder = FrameEncoder::new(&planes, screen_tools, false, 10);
+        // The 64x64 and 32x32 ancestors are forced SPLIT at these frame edges
+        // and carry no symbols. The visible 16x16 partition has two leaves.
+        let partition = if vertical { 2 } else { 1 };
+        let ctx = encoder.partition_ctx(0, 0, 2);
+        encoder.sym.encode_symbol(partition, partition_cdf(2, ctx));
+        encoder.update_partition_ctx(0, 0, 2, partition);
+        let (bw, bh) = if vertical { (8, 16) } else { (16, 8) };
+        encoder.block_replay = Some(BlockReplay {
+            decisions: (0..2)
+                .map(|i| BlockDecision {
+                    r: if vertical { 0 } else { i * 2 },
+                    c: if vertical { i * 2 } else { 0 },
+                    bw,
+                    bh,
+                    palette: None,
+                    y_mode: DC_PRED,
+                    uv_mode: DC_PRED,
+                    y_angle_delta: 0,
+                    uv_angle_delta: 0,
+                    cfl: None,
+                })
+                .collect(),
+            next: 0,
+            failed: false,
+        });
+        encoder.encode_partition_children(0, 0, 16, partition, 0, false);
+        assert_eq!(encoder.block_replay.as_ref().unwrap().next, 2);
+        let config = headers::Av1StillConfig {
+            seq_profile: if depth == 12 { 2 } else { 1 },
+            seq_level_idx_0: 0,
+            seq_tier_0: 0,
+            high_bitdepth: depth > 8,
+            twelve_bit: depth == 12,
+            monochrome: false,
+            chroma_subsampling_x: 0,
+            chroma_subsampling_y: 0,
+            chroma_sample_position: 0,
+            color_primaries: 1,
+            transfer_characteristics: 13,
+            matrix_coefficients: 0,
+            full_range: true,
+        };
+        let sequence = headers::sequence_header_payload(&config, 16, 16);
+        let mut frame = headers::frame_header_payload(16, 16, 4, 4, false, screen_tools);
+        frame.extend(encoder.sym.finish());
+        // Elementary-stream demuxers require a temporal delimiter; AVIF's
+        // mdat framing normally supplies the temporal-unit boundary instead.
+        let mut stream = vec![0x12, 0];
+        stream.extend(headers::assemble_temporal_unit(&sequence, &frame));
+        stream
+    }
+
+    #[test]
+    fn rectangular_leaf_bitstreams_match_independent_oracles() {
+        macro_rules! case {
+            ($shape:literal, $vertical:literal, $depth:literal, $screen:literal) => {
+                assert_eq!(
+                    rectangular_leaf_stream($depth, $vertical, $screen != 0).as_slice(),
+                    include_bytes!(concat!(
+                        "../tests/fixtures/rect-",
+                        $shape,
+                        "-",
+                        stringify!($depth),
+                        "-screen",
+                        stringify!($screen),
+                        ".obu"
+                    ))
+                    .as_slice(),
+                    "{} / {} bit / screen tools {}",
+                    $shape,
+                    $depth,
+                    $screen
+                );
+            };
+        }
+        case!("horz", false, 8, 0);
+        case!("horz", false, 8, 1);
+        case!("horz", false, 10, 0);
+        case!("horz", false, 10, 1);
+        case!("horz", false, 12, 0);
+        case!("horz", false, 12, 1);
+        case!("vert", true, 8, 0);
+        case!("vert", true, 8, 1);
+        case!("vert", true, 10, 0);
+        case!("vert", true, 10, 1);
+        case!("vert", true, 12, 0);
+        case!("vert", true, 12, 1);
+    }
+
+    #[test]
+    fn rectangular_leaf_pixels_match_dav1d_and_libaom() {
+        use std::io::Write;
+        use std::process::{Command, Stdio};
+        let ffmpeg = std::env::var_os("AVIF_FFMPEG").unwrap_or_else(|| "ffmpeg".into());
+        let available = Command::new(&ffmpeg)
+            .arg("-version")
+            .output()
+            .is_ok_and(|result| result.status.success());
+        if !available {
+            assert!(
+                std::env::var_os("AVIF_REQUIRE_FFMPEG").is_none(),
+                "FFmpeg is required by this test run"
+            );
+            eprintln!("FFmpeg unavailable; frozen rectangular bitstream oracles still run");
+            return;
+        }
+        for depth in [8, 10, 12] {
+            let max = (1u32 << depth) - 1;
+            let expected = (0..3)
+                .flat_map(|plane| {
+                    (0..16).flat_map(move |y| {
+                        (0..16).map(move |x| {
+                            ((x * (37 + plane * 11) + y * (19 + plane * 7) + plane * 29) * max
+                                / 2047) as u16
+                        })
+                    })
+                })
+                .flat_map(|sample| {
+                    if depth == 8 {
+                        vec![sample as u8]
+                    } else {
+                        sample.to_le_bytes().to_vec()
+                    }
+                })
+                .collect::<Vec<_>>();
+            let pixel_format = if depth == 8 {
+                "gbrp".to_owned()
+            } else {
+                format!("gbrp{depth}le")
+            };
+            for vertical in [false, true] {
+                for screen in [false, true] {
+                    let stream = rectangular_leaf_stream(depth, vertical, screen);
+                    for decoder in ["libdav1d", "libaom-av1"] {
+                        let mut child = Command::new(&ffmpeg)
+                            .args([
+                                "-v",
+                                "error",
+                                "-c:v",
+                                decoder,
+                                "-f",
+                                "obu",
+                                "-i",
+                                "pipe:0",
+                                "-frames:v",
+                                "1",
+                                "-pix_fmt",
+                                &pixel_format,
+                                "-f",
+                                "rawvideo",
+                                "pipe:1",
+                            ])
+                            .stdin(Stdio::piped())
+                            .stdout(Stdio::piped())
+                            .stderr(Stdio::piped())
+                            .spawn()
+                            .unwrap();
+                        child.stdin.take().unwrap().write_all(&stream).unwrap();
+                        let result = child.wait_with_output().unwrap();
+                        assert!(
+                            result.status.success(),
+                            "{decoder}, {depth} bit, vertical={vertical}, screen={screen}: {}",
+                            String::from_utf8_lossy(&result.stderr)
+                        );
+                        assert_eq!(
+                            result.stdout, expected,
+                            "{decoder}, {depth} bit, vertical={vertical}, screen={screen}"
+                        );
+                    }
+                }
+            }
+        }
+    }
 
     #[test]
     fn cdf_index_map_keeps_integer_context_keys_distinct() {
