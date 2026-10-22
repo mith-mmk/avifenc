@@ -1,0 +1,44 @@
+{
+  "default": {
+    "passed": 96,
+    "failed": 0,
+    "ignored": 0
+  },
+  "asm": {
+    "passed": 96,
+    "failed": 0,
+    "ignored": 0
+  },
+  "all": {
+    "passed": 96,
+    "failed": 0,
+    "ignored": 0
+  },
+  "cpu_dispatch_caps": [
+    "RUST",
+    "SSE2",
+    "SSSE3",
+    "SSE4_1",
+    "AVX2",
+    "AVX512",
+    "AVX512ICL"
+  ],
+  "format": "passed",
+  "clippy": "all-features/all-targets diagnostic passes allowing only the three pre-existing collapsible_else_if warnings; no source suppression added",
+  "required_oracles": "three mandatory complete AVIF byte comparisons generated with immutable portable baseline6a7ba0a; no external tool or optional skip",
+  "hosted_ci": "new portable, asm, all-features-MSRV jobs; status recorded in PR after push",
+  "strict_clippy": {
+    "exit_code": 101,
+    "known_lint": "clippy::collapsible_else_if",
+    "locations": [
+      "src/encoder.rs:1289:12",
+      "src/encoder.rs:1521:12",
+      "src/lossless_tile.rs:2143:20"
+    ],
+    "new_source_allow_attributes": false
+  },
+  "controls": {
+    "portable_output_allocations_identical": true,
+    "lossless_output_allocations_identical": true
+  }
+}

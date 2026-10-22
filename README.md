@@ -47,6 +47,37 @@ produce larger AVIF files, matching libavif's speed/size trade-off.
 The public-name comparison against `avif-rust` is recorded in
 [`API_COMPATIBILITY.md`](API_COMPATIBILITY.md).
 
+## Optional native SIMD
+
+The default build remains portable Pure Rust. This branch adds an opt-in
+`asm` feature forwarding to rav1e's existing native SIMD kernels:
+
+```sh
+cargo build --release --features asm
+cargo run --release --features asm --example performance -- 128 128 60 alpha 9
+```
+
+On x86_64, NASM 2.15 or newer must be on PATH, together with the native
+compiler/linker toolchain (tested with NASM 2.16.03 on Linux x86_64). Other
+native targets follow rav1e's platform build requirements. No vendored
+backend is introduced. The feature can be combined with `multithread`;
+benchmark comparisons isolate SIMD with threading disabled.
+
+SIMD dispatch detects CPU capabilities at runtime. With `asm`, 8-bit images
+use rav1e's u8 context; 10/12-bit images keep u16. This matters because rav1e
+selects its low/high depth kernels using the context's pixel type. The
+portable path retains its existing u16 context. Search presets, quality,
+color metadata and the lossless backend are unchanged.
+
+On the measured AMD EPYC host, six lossy workloads took 41–52% less time
+with identical complete encoded-byte hashes, including 8/10/12-bit inputs
+and a natural-image fixture. This is an explicit build tradeoff: the example
+executable grew from 2.41 to 4.16 MB and peak RSS rose despite fewer temporary
+allocations. See [PERFORMANCE.md](PERFORMANCE.md) for raw repetitions, memory,
+binary size, frozen reference tests and rejected experiments. These results
+are scoped to the measured inputs and host; the feature is not enabled by
+default.
+
 ## Encoding benchmark
 
 The benchmark example accepts an RGBA8 raw input and reports encoding time,

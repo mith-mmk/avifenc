@@ -1,6 +1,6 @@
 use rav1e::prelude::{
     ChromaSampling, ColorDescription, ColorPrimaries, Config, EncoderConfig as Rav1eEncoderConfig,
-    EncoderStatus, MatrixCoefficients, PixelRange, PredictionModesSetting, Rational,
+    EncoderStatus, MatrixCoefficients, Pixel, PixelRange, PredictionModesSetting, Rational,
     SegmentationLevel, TransferCharacteristics, Tune,
 };
 
@@ -468,7 +468,6 @@ pub fn encode_native_bytes(
             &effective,
         )?
     };
-    let primary = native_container_frame(primary, sampling);
     let alpha_frame = alpha
         .map(|samples| {
             let alpha_options = native_alpha_backend_options(&effective, options.bit_depth);
@@ -509,7 +508,7 @@ pub fn encode_native_bytes(
                     &alpha_options,
                 )
             }?;
-            Ok::<_, EncoderError>(native_container_frame(frame, Sampling::Cs400))
+            Ok::<_, EncoderError>(frame)
         })
         .transpose()?;
     let native_color = NativeColorSource {
@@ -527,11 +526,11 @@ pub fn encode_native_bytes(
     )
 }
 
-fn native_container_frame(mut frame: EncodedFrame, sampling: Sampling) -> EncodedFrame {
+fn normalize_container_frame(mut frame: EncodedFrame, sampling: Sampling) -> EncodedFrame {
     if sampling == Sampling::Cs400 && frame.sequence_header.len() >= 3 {
         // AV1's monochrome color_config infers both chroma subsampling flags
         // as one.  rav1e's compact container header may retain the luma-plane
-        // layout (1,0) in lossy mode; the native API must make av1C agree with
+        // layout (1,0) in lossy mode; every API must make av1C agree with
         // the actual sequence header without changing the supplied plane.
         frame.sequence_header[2] |= 0x0c;
     }
@@ -806,95 +805,145 @@ fn encode_planes_with_prediction(
     complete_keyframe_search: bool,
 ) -> Result<EncodedFrame, EncoderError> {
     let _timing = Guard::new(Kind::Rav1eEncode);
-    if planes.len() != if sampling == Sampling::Cs400 { 1 } else { 3 } {
-        return Err(EncoderError::InvalidParam(
-            "plane count does not match chroma sampling".to_string(),
-        ));
+    let _variant = Guard::new(if complete_keyframe_search {
+        Kind::Rav1eComplete
+    } else {
+        Kind::Rav1eBase
+    });
+    {
+        let _validation = Guard::new(Kind::Rav1eValidation);
+        if planes.len() != if sampling == Sampling::Cs400 { 1 } else { 3 } {
+            return Err(EncoderError::InvalidParam(
+                "plane count does not match chroma sampling".to_string(),
+            ));
+        }
+        for (index, plane) in planes.iter().enumerate() {
+            let expected = if index == 0 {
+                (width, height)
+            } else {
+                chroma_dimensions(width, height, sampling)
+            };
+            if (plane.width, plane.height) != expected {
+                return Err(EncoderError::InvalidParam(format!(
+                    "plane {index} has {}x{}, expected {}x{}",
+                    plane.width, plane.height, expected.0, expected.1
+                )));
+            }
+            let expected_samples = plane.width.checked_mul(plane.height).ok_or_else(|| {
+                EncoderError::InvalidParam("plane size overflows usize".to_string())
+            })?;
+            if plane.samples.len() != expected_samples {
+                return Err(EncoderError::InvalidParam(format!(
+                    "plane {index} has {} samples, expected {expected_samples}",
+                    plane.samples.len()
+                )));
+            }
+            let max_sample = (1u32 << u32::from(bit_depth)) - 1;
+            if plane
+                .samples
+                .iter()
+                .any(|&sample| u32::from(sample) > max_sample)
+            {
+                return Err(EncoderError::InvalidParam(format!(
+                    "plane {index} contains a sample outside the {bit_depth}-bit range"
+                )));
+            }
+        }
     }
-    for (index, plane) in planes.iter().enumerate() {
-        let expected = if index == 0 {
-            (width, height)
-        } else {
-            chroma_dimensions(width, height, sampling)
-        };
-        if (plane.width, plane.height) != expected {
-            return Err(EncoderError::InvalidParam(format!(
-                "plane {index} has {}x{}, expected {}x{}",
-                plane.width, plane.height, expected.0, expected.1
-            )));
-        }
-        let expected_samples = plane
-            .width
-            .checked_mul(plane.height)
-            .ok_or_else(|| EncoderError::InvalidParam("plane size overflows usize".to_string()))?;
-        if plane.samples.len() != expected_samples {
-            return Err(EncoderError::InvalidParam(format!(
-                "plane {index} has {} samples, expected {expected_samples}",
-                plane.samples.len()
-            )));
-        }
-        let max_sample = (1u32 << u32::from(bit_depth)) - 1;
-        if plane
-            .samples
-            .iter()
-            .any(|&sample| u32::from(sample) > max_sample)
-        {
-            return Err(EncoderError::InvalidParam(format!(
-                "plane {index} contains a sample outside the {bit_depth}-bit range"
-            )));
-        }
+    let config = {
+        let _config = Guard::new(Kind::Rav1eConfig);
+        validated_rav1e_config(
+            width,
+            height,
+            sampling,
+            bit_depth,
+            options,
+            complete_keyframe_search,
+        )?
+    };
+    // Native SIMD dispatch uses the pixel type to select 8/10/12-bit kernels.
+    // Keep the existing u16 storage for portable builds; SIMD-enabled 8-bit
+    // images must use u8 so they do not enter the high-bit-depth kernels.
+    #[cfg(feature = "asm")]
+    if bit_depth == 8 {
+        return encode_rav1e_pixels::<u8>(width, height, planes, sampling, &config);
     }
+    encode_rav1e_pixels::<u16>(width, height, planes, sampling, &config)
+}
 
-    let config = validated_rav1e_config(
-        width,
-        height,
-        sampling,
-        bit_depth,
-        options,
-        complete_keyframe_search,
-    )?;
-    let mut context = config
-        .new_context::<u16>()
-        .map_err(|error| EncoderError::InvalidParam(error.to_string()))?;
-    let mut frame = context.new_frame();
-    for (index, plane) in planes.iter().enumerate() {
-        let destination_stride = frame.planes[index].cfg.stride;
-        let destination = frame.planes[index].data_origin_mut();
-        for (destination_row, source_row) in destination
-            .chunks_exact_mut(destination_stride)
-            .take(plane.height)
-            .zip(plane.samples.chunks_exact(plane.width))
-        {
-            destination_row[..plane.width].copy_from_slice(source_row);
+// The input range is checked before choosing the storage type. rav1e uses
+// i16 coefficients with u8 pixels and i32 coefficients with u16 pixels.
+fn encode_rav1e_pixels<T: Pixel>(
+    width: usize,
+    height: usize,
+    planes: &[PlaneInput<'_>],
+    sampling: Sampling,
+    config: &Config,
+) -> Result<EncodedFrame, EncoderError> {
+    let mut context = {
+        let _context = Guard::new(Kind::Rav1eContext);
+        config
+            .new_context::<T>()
+            .map_err(|error| EncoderError::InvalidParam(error.to_string()))?
+    };
+    let mut frame = {
+        let _frame = Guard::new(Kind::Rav1eFrame);
+        context.new_frame()
+    };
+    {
+        let _copy = Guard::new(Kind::Rav1eCopy);
+        for (index, plane) in planes.iter().enumerate() {
+            let destination_stride = frame.planes[index].cfg.stride;
+            let destination = frame.planes[index].data_origin_mut();
+            for (destination_row, source_row) in destination
+                .chunks_exact_mut(destination_stride)
+                .take(plane.height)
+                .zip(plane.samples.chunks_exact(plane.width))
+            {
+                for (destination, &source) in
+                    destination_row[..plane.width].iter_mut().zip(source_row)
+                {
+                    *destination = T::cast_from(source);
+                }
+            }
+            // rav1e's plane padding takes the visible luma dimensions and applies
+            // the plane's subsampling internally. Passing the already-subsampled
+            // chroma dimensions leaves the right/bottom edge under-padded for odd
+            // image sizes.
+            frame.planes[index].pad(width, height);
         }
-        // rav1e's plane padding takes the visible luma dimensions and applies
-        // the plane's subsampling internally. Passing the already-subsampled
-        // chroma dimensions leaves the right/bottom edge under-padded for odd
-        // image sizes.
-        frame.planes[index].pad(width, height);
     }
-    context
-        .send_frame(frame)
-        .map_err(|error| EncoderError::Bitstream(error.to_string()))?;
-    context.flush();
+    {
+        let _submit = Guard::new(Kind::Rav1eSubmit);
+        context
+            .send_frame(frame)
+            .map_err(|error| EncoderError::Bitstream(error.to_string()))?;
+        context.flush();
+    }
 
     let mut packet = None;
-    loop {
-        match context.receive_packet() {
-            Ok(value) => packet = Some(value.data),
-            Err(EncoderStatus::Encoded) => continue,
-            Err(EncoderStatus::LimitReached) => break,
-            Err(error) => return Err(EncoderError::Bitstream(error.to_string())),
+    {
+        let _packets = Guard::new(Kind::Rav1ePackets);
+        loop {
+            match context.receive_packet() {
+                Ok(value) => packet = Some(value.data),
+                Err(EncoderStatus::Encoded) => continue,
+                Err(EncoderStatus::LimitReached) => break,
+                Err(error) => return Err(EncoderError::Bitstream(error.to_string())),
+            }
         }
     }
     let frame_payload = packet.ok_or_else(|| {
         EncoderError::NotEnoughData("rav1e produced no AV1 frame packet".to_string())
     })?;
-    Ok(EncodedFrame {
-        sequence_header: context.container_sequence_header().to_vec(),
-        frame_payload,
-        pixel_channels: planes.len() as u8,
-    })
+    Ok(normalize_container_frame(
+        EncodedFrame {
+            sequence_header: context.container_sequence_header().to_vec(),
+            frame_payload,
+            pixel_channels: planes.len() as u8,
+        },
+        sampling,
+    ))
 }
 
 // This builds and validates settings only: no context, threads, frame or samples.
@@ -1351,12 +1400,18 @@ fn encode_rgba8_rgb_lossless(
     height: u32,
     speed: u8,
 ) -> Result<EncodedFrame, EncoderError> {
-    let rgb = image
-        .rgba
-        .chunks_exact(4)
-        .flat_map(|pixel| pixel[..3].iter().copied())
-        .collect::<Vec<_>>();
-    encode_gamut_lossless_frame(width, height, &rgb, speed)
+    // RGBA8 has already been validated. Build the identity-matrix GBR
+    // planes directly instead of staging interleaved RGB at two precisions.
+    let sample_count = image.rgba.len() / 4;
+    let mut g = Vec::with_capacity(sample_count);
+    let mut b = Vec::with_capacity(sample_count);
+    let mut r = Vec::with_capacity(sample_count);
+    for pixel in image.rgba.chunks_exact(4) {
+        r.push(u16::from(pixel[0]));
+        g.push(u16::from(pixel[1]));
+        b.push(u16::from(pixel[2]));
+    }
+    encode_lossless_gbr_planes(width, height, 8, [&g, &b, &r], speed)
 }
 
 fn encode_rgba8_alpha_lossless(
@@ -1427,15 +1482,10 @@ fn encode_rgba16_with_lossless_items(
     alpha_lossless: bool,
 ) -> Result<Vec<u8>, EncoderError> {
     let max = ((1u32 << u32::from(bit_depth)) - 1) as u16;
-    let mut rgb = Vec::with_capacity(image.rgba.len().saturating_sub(image.rgba.len() / 4));
     let mut alpha_samples = Vec::with_capacity(image.rgba.len() / 4);
     let mut has_alpha = false;
     for pixel in image.rgba.chunks_exact(4) {
-        let red = scale_u16(pixel[0], u32::from(max)) as u16;
-        let green = scale_u16(pixel[1], u32::from(max)) as u16;
-        let blue = scale_u16(pixel[2], u32::from(max)) as u16;
         let alpha = scale_u16(pixel[3], u32::from(max)) as u16;
-        rgb.extend_from_slice(&[red, green, blue]);
         alpha_samples.push(alpha);
         has_alpha |= alpha != max;
     }
@@ -1455,19 +1505,21 @@ fn encode_rgba16_with_lossless_items(
         .map_err(|_| EncoderError::InvalidParam("image height exceeds u32".to_string()))?;
     let primary = if color_lossless {
         if grayscale {
-            let gray = rgb
-                .chunks_exact(3)
-                .map(|pixel| pixel[0])
+            let gray = image
+                .rgba
+                .chunks_exact(4)
+                .map(|pixel| scale_u16(pixel[0], u32::from(max)) as u16)
                 .collect::<Vec<_>>();
             encode_lossless_gray_samples(width, height, &gray, bit_depth, options.speed)?
         } else {
-            encode_gamut_lossless_samples(width, height, &rgb, bit_depth, options.speed)?
+            encode_rgba16_rgb_lossless(image, width, height, bit_depth, options.speed)?
         }
     } else {
         if grayscale {
-            let gray = rgb
-                .chunks_exact(3)
-                .map(|pixel| pixel[0])
+            let gray = image
+                .rgba
+                .chunks_exact(4)
+                .map(|pixel| scale_u16(pixel[0], u32::from(max)) as u16)
                 .collect::<Vec<_>>();
             let planes = [PlaneInput {
                 samples: &gray,
@@ -1665,16 +1717,29 @@ fn encode_lossless_native_full(
     write_avif(buffers.width, buffers.height, &primary, None, &effective)
 }
 
-fn encode_gamut_lossless_frame(
+// Public RGBA16 validation and lossless-option checks precede this helper.
+// Scale directly into final GBR planes without retaining interleaved RGB.
+fn encode_rgba16_rgb_lossless(
+    image: &Rgba16ImageBuffer,
     width: u32,
     height: u32,
-    rgb: &[u8],
+    bit_depth: u8,
     speed: u8,
 ) -> Result<EncodedFrame, EncoderError> {
-    let rgb = rgb.iter().copied().map(u16::from).collect::<Vec<_>>();
-    encode_gamut_lossless_samples(width, height, &rgb, 8, speed)
+    let max = (1u32 << u32::from(bit_depth)) - 1;
+    let count = image.rgba.len() / 4;
+    let mut g = Vec::with_capacity(count);
+    let mut b = Vec::with_capacity(count);
+    let mut r = Vec::with_capacity(count);
+    for pixel in image.rgba.chunks_exact(4) {
+        r.push(scale_u16(pixel[0], max) as u16);
+        g.push(scale_u16(pixel[1], max) as u16);
+        b.push(scale_u16(pixel[2], max) as u16);
+    }
+    encode_lossless_gbr_planes(width, height, bit_depth, [&g, &b, &r], speed)
 }
 
+#[cfg(test)]
 fn encode_gamut_lossless_samples(
     width: u32,
     height: u32,
@@ -1719,6 +1784,16 @@ fn encode_gamut_lossless_samples(
         g.push(pixel[1]);
         b.push(pixel[2]);
     }
+    encode_lossless_gbr_planes(width, height, bit_depth, [&g, &b, &r], speed)
+}
+
+fn encode_lossless_gbr_planes(
+    width: u32,
+    height: u32,
+    bit_depth: u8,
+    gbr: [&[u16]; 3],
+    speed: u8,
+) -> Result<EncodedFrame, EncoderError> {
     let planes = LosslessPlanes {
         width,
         height,
@@ -1730,7 +1805,7 @@ fn encode_gamut_lossless_samples(
         transfer_characteristics: 13,
         matrix_coefficients: 0,
         full_range: true,
-        planes: vec![&g, &b, &r],
+        planes: gbr.to_vec(),
     };
     encode_lossless_plane_set(&planes, speed)
 }
@@ -2674,5 +2749,98 @@ mod preflight_backend_tests {
         assert!(
             validate_native_backend_settings(16385, 1, Sampling::Cs400, 8, true, &options).is_err()
         );
+    }
+}
+
+#[cfg(test)]
+mod rgba8_planar_lossless_tests {
+    use super::*;
+
+    #[test]
+    fn direct_rgba8_gbr_matches_interleaved_rgb_route() {
+        for (width, height) in [(1, 1), (5, 3), (16, 9)] {
+            let rgba = (0..width * height)
+                .flat_map(|i| {
+                    [
+                        (i * 37) as u8,
+                        (255 - i % 256) as u8,
+                        (i * 101) as u8,
+                        (i * 17) as u8,
+                    ]
+                })
+                .collect();
+            let image = ImageBuffer {
+                width,
+                height,
+                rgba,
+            };
+            let rgb = image
+                .rgba
+                .chunks_exact(4)
+                .flat_map(|pixel| pixel[..3].iter().copied().map(u16::from))
+                .collect::<Vec<_>>();
+            for speed in [0, 6, 10] {
+                let direct =
+                    encode_rgba8_rgb_lossless(&image, width as u32, height as u32, speed).unwrap();
+                let staged =
+                    encode_gamut_lossless_samples(width as u32, height as u32, &rgb, 8, speed)
+                        .unwrap();
+                assert_eq!(direct.sequence_header, staged.sequence_header);
+                assert_eq!(
+                    direct.frame_payload, staged.frame_payload,
+                    "{width}x{height} speed{speed}"
+                );
+                assert_eq!(direct.pixel_channels, staged.pixel_channels);
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod rgba16_staging_tests {
+    use super::*;
+    #[test]
+    fn direct_scaled_gbr_matches_former_interleaved_route() {
+        for (width, height) in [(1, 1), (5, 3), (17, 9)] {
+            let image = Rgba16ImageBuffer {
+                width,
+                height,
+                rgba: (0..width * height * 4)
+                    .map(|i| (i as u16).wrapping_mul(4253).wrapping_add(17))
+                    .collect(),
+            };
+            for bits in [8, 10, 12] {
+                let max = (1u32 << bits) - 1;
+                let rgb: Vec<u16> = image
+                    .rgba
+                    .chunks_exact(4)
+                    .flat_map(|p| p[..3].iter().map(|&v| scale_u16(v, max) as u16))
+                    .collect();
+                for speed in [0, 6, 10] {
+                    let direct = encode_rgba16_rgb_lossless(
+                        &image,
+                        width as u32,
+                        height as u32,
+                        bits,
+                        speed,
+                    )
+                    .unwrap();
+                    let former = encode_gamut_lossless_samples(
+                        width as u32,
+                        height as u32,
+                        &rgb,
+                        bits,
+                        speed,
+                    )
+                    .unwrap();
+                    assert_eq!(direct.sequence_header, former.sequence_header);
+                    assert_eq!(
+                        direct.frame_payload, former.frame_payload,
+                        "{width}x{height} {bits}bit speed{speed}"
+                    );
+                    assert_eq!(direct.pixel_channels, former.pixel_channels);
+                }
+            }
+        }
     }
 }

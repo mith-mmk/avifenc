@@ -13,6 +13,8 @@ repository = "https://github.com/mith-mmk/avifenc.git"
 default = []
 multithread = ["rav1e/threading"]
 profile = []
+# Optional rav1e native SIMD; portable pure Rust remains the default.
+asm = ["rav1e/asm"]
 
 [dependencies]
 avif-image-buffer = { version = "0.1.0", git = "https://github.com/mith-mmk/avif-rust.git", rev = "5c73c7f26c276098ddd761fb20b956302a462001" }

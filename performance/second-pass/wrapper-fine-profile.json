@@ -1,0 +1,278 @@
+{
+  "baseline_revision": "008956dc09b52bc793ffa0dc00b5f7cc2f964b5f",
+  "diagnostic": "Baseline algorithm with profile-only wrapper guards. Default feature comparison timings use separate binaries. Nested guard times overlap.",
+  "arguments": [
+    "64",
+    "64",
+    "60",
+    "alpha",
+    "3"
+  ],
+  "runs": [
+    {
+      "rgba_to_yuv": {
+        "calls": 1,
+        "ms": 0.032
+      },
+      "rav1e_encode": {
+        "calls": 4,
+        "ms": 510.524
+      },
+      "container": {
+        "calls": 1,
+        "ms": 0.012
+      },
+      "rav1e_validation": {
+        "calls": 4,
+        "ms": 0.011
+      },
+      "rav1e_config": {
+        "calls": 4,
+        "ms": 0.011
+      },
+      "rav1e_context": {
+        "calls": 4,
+        "ms": 0.023
+      },
+      "rav1e_frame": {
+        "calls": 4,
+        "ms": 0.123
+      },
+      "rav1e_copy_pad": {
+        "calls": 4,
+        "ms": 0.011
+      },
+      "rav1e_submit_flush": {
+        "calls": 4,
+        "ms": 0.354
+      },
+      "rav1e_receive_packets": {
+        "calls": 4,
+        "ms": 509.89
+      },
+      "rav1e_base": {
+        "calls": 2,
+        "ms": 197.442
+      },
+      "rav1e_complete": {
+        "calls": 2,
+        "ms": 313.082
+      }
+    },
+    {
+      "rgba_to_yuv": {
+        "calls": 1,
+        "ms": 0.021
+      },
+      "rav1e_encode": {
+        "calls": 4,
+        "ms": 479.56
+      },
+      "container": {
+        "calls": 1,
+        "ms": 0.012
+      },
+      "rav1e_validation": {
+        "calls": 4,
+        "ms": 0.009
+      },
+      "rav1e_config": {
+        "calls": 4,
+        "ms": 0.008
+      },
+      "rav1e_context": {
+        "calls": 4,
+        "ms": 0.015
+      },
+      "rav1e_frame": {
+        "calls": 4,
+        "ms": 0.054
+      },
+      "rav1e_copy_pad": {
+        "calls": 4,
+        "ms": 0.01
+      },
+      "rav1e_submit_flush": {
+        "calls": 4,
+        "ms": 0.357
+      },
+      "rav1e_receive_packets": {
+        "calls": 4,
+        "ms": 478.958
+      },
+      "rav1e_base": {
+        "calls": 2,
+        "ms": 192.523
+      },
+      "rav1e_complete": {
+        "calls": 2,
+        "ms": 287.036
+      }
+    },
+    {
+      "rgba_to_yuv": {
+        "calls": 1,
+        "ms": 0.042
+      },
+      "rav1e_encode": {
+        "calls": 4,
+        "ms": 485.907
+      },
+      "container": {
+        "calls": 1,
+        "ms": 0.013
+      },
+      "rav1e_validation": {
+        "calls": 4,
+        "ms": 0.009
+      },
+      "rav1e_config": {
+        "calls": 4,
+        "ms": 0.009
+      },
+      "rav1e_context": {
+        "calls": 4,
+        "ms": 0.015
+      },
+      "rav1e_frame": {
+        "calls": 4,
+        "ms": 0.058
+      },
+      "rav1e_copy_pad": {
+        "calls": 4,
+        "ms": 0.013
+      },
+      "rav1e_submit_flush": {
+        "calls": 4,
+        "ms": 0.524
+      },
+      "rav1e_receive_packets": {
+        "calls": 4,
+        "ms": 485.16
+      },
+      "rav1e_base": {
+        "calls": 2,
+        "ms": 184.296
+      },
+      "rav1e_complete": {
+        "calls": 2,
+        "ms": 301.611
+      }
+    },
+    {
+      "rgba_to_yuv": {
+        "calls": 1,
+        "ms": 0.025
+      },
+      "rav1e_encode": {
+        "calls": 4,
+        "ms": 497.92
+      },
+      "container": {
+        "calls": 1,
+        "ms": 0.013
+      },
+      "rav1e_validation": {
+        "calls": 4,
+        "ms": 0.009
+      },
+      "rav1e_config": {
+        "calls": 4,
+        "ms": 0.008
+      },
+      "rav1e_context": {
+        "calls": 4,
+        "ms": 0.014
+      },
+      "rav1e_frame": {
+        "calls": 4,
+        "ms": 0.057
+      },
+      "rav1e_copy_pad": {
+        "calls": 4,
+        "ms": 0.01
+      },
+      "rav1e_submit_flush": {
+        "calls": 4,
+        "ms": 0.537
+      },
+      "rav1e_receive_packets": {
+        "calls": 4,
+        "ms": 497.096
+      },
+      "rav1e_base": {
+        "calls": 2,
+        "ms": 191.506
+      },
+      "rav1e_complete": {
+        "calls": 2,
+        "ms": 306.413
+      }
+    },
+    {
+      "rgba_to_yuv": {
+        "calls": 1,
+        "ms": 0.021
+      },
+      "rav1e_encode": {
+        "calls": 4,
+        "ms": 484.236
+      },
+      "container": {
+        "calls": 1,
+        "ms": 0.014
+      },
+      "rav1e_validation": {
+        "calls": 4,
+        "ms": 0.01
+      },
+      "rav1e_config": {
+        "calls": 4,
+        "ms": 0.008
+      },
+      "rav1e_context": {
+        "calls": 4,
+        "ms": 0.014
+      },
+      "rav1e_frame": {
+        "calls": 4,
+        "ms": 0.056
+      },
+      "rav1e_copy_pad": {
+        "calls": 4,
+        "ms": 0.01
+      },
+      "rav1e_submit_flush": {
+        "calls": 4,
+        "ms": 0.535
+      },
+      "rav1e_receive_packets": {
+        "calls": 4,
+        "ms": 483.519
+      },
+      "rav1e_base": {
+        "calls": 2,
+        "ms": 190.142
+      },
+      "rav1e_complete": {
+        "calls": 2,
+        "ms": 294.093
+      }
+    }
+  ],
+  "median_timed_stage_ms": {
+    "rgba_to_yuv": 0.025,
+    "rav1e_encode": 485.907,
+    "container": 0.013,
+    "rav1e_validation": 0.009,
+    "rav1e_config": 0.008,
+    "rav1e_context": 0.015,
+    "rav1e_frame": 0.057,
+    "rav1e_copy_pad": 0.01,
+    "rav1e_submit_flush": 0.524,
+    "rav1e_receive_packets": 485.16,
+    "rav1e_base": 191.506,
+    "rav1e_complete": 301.611
+  },
+  "profile_source_sha256": "cc6114a413d2051cebc3685e44c5b8b0b5fdca53e99eb98cd43bdf6c6d8b4011"
+}

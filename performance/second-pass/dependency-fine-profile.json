@@ -1,0 +1,1274 @@
+{
+  "baseline_revision": "008956dc09b52bc793ffa0dc00b5f7cc2f964b5f",
+  "dependency": "rav1e0.8.1, registry source copied to/tmp and instrumented only for diagnostics",
+  "dependency_checksum": "43b6dd56e85d9483277cde964fd1bdb0428de4fec5ebba7540995639a21cb32b",
+  "build": "Temporary baseline Cargo.toml [patch.crates-io] rav1e.path points at the diagnostic source copy; original repo manifest and Cargo.lock unchanged. cargo build --offline --release --features profile --example performance",
+  "arguments": [
+    "64",
+    "64",
+    "60",
+    "alpha",
+    "3"
+  ],
+  "instrumentation": "Inclusive/nested RAII timers; potential measurement overhead; not used for before/after timing. Groups of four serial backend frames represent one API call. Median sums use three timed calls, exclude warm-up and allocation-only call. Do not add nested phases.",
+  "encoded_checksum": "e970c12e63eb138c",
+  "matches_uninstrumented_baseline": true,
+  "records": [
+    {
+      "prediction": "Simple",
+      "packet_bytes": 1149,
+      "stages": {
+        "tile": {
+          "calls": 1,
+          "ms": 74.660829
+        },
+        "intra_mode_rdo": {
+          "calls": 4,
+          "ms": 73.163911
+        },
+        "tx_size_type_rdo": {
+          "calls": 111,
+          "ms": 63.421675
+        },
+        "tx_type_rdo": {
+          "calls": 333,
+          "ms": 63.401468
+        },
+        "cfl_rdo": {
+          "calls": 4,
+          "ms": 0.054198
+        },
+        "distortion": {
+          "calls": 1378,
+          "ms": 0.900821
+        },
+        "encode_tx_block": {
+          "calls": 16585,
+          "ms": 70.956151
+        },
+        "loop_filter_queue": {
+          "calls": 1,
+          "ms": 0.580963
+        },
+        "prediction": {
+          "calls": 16585,
+          "ms": 4.846344
+        },
+        "forward_transform": {
+          "calls": 16585,
+          "ms": 9.782796
+        },
+        "quantization": {
+          "calls": 16585,
+          "ms": 6.915904
+        },
+        "coefficient_entropy": {
+          "calls": 16585,
+          "ms": 27.144881
+        },
+        "dequantization": {
+          "calls": 16585,
+          "ms": 0.850099
+        },
+        "inverse_transform": {
+          "calls": 16585,
+          "ms": 16.812117
+        }
+      }
+    },
+    {
+      "prediction": "Complex-KFs",
+      "packet_bytes": 1129,
+      "stages": {
+        "tile": {
+          "calls": 1,
+          "ms": 117.131726
+        },
+        "intra_mode_rdo": {
+          "calls": 4,
+          "ms": 115.665152
+        },
+        "tx_size_type_rdo": {
+          "calls": 174,
+          "ms": 98.081973
+        },
+        "tx_type_rdo": {
+          "calls": 522,
+          "ms": 98.051743
+        },
+        "cfl_rdo": {
+          "calls": 4,
+          "ms": 0.054369
+        },
+        "distortion": {
+          "calls": 2308,
+          "ms": 1.442654
+        },
+        "encode_tx_block": {
+          "calls": 26962,
+          "ms": 111.981679
+        },
+        "loop_filter_queue": {
+          "calls": 1,
+          "ms": 0.55828
+        },
+        "prediction": {
+          "calls": 26962,
+          "ms": 5.219244
+        },
+        "forward_transform": {
+          "calls": 26962,
+          "ms": 15.872814
+        },
+        "quantization": {
+          "calls": 26962,
+          "ms": 11.175673
+        },
+        "coefficient_entropy": {
+          "calls": 26962,
+          "ms": 43.72632
+        },
+        "dequantization": {
+          "calls": 26962,
+          "ms": 1.326491
+        },
+        "inverse_transform": {
+          "calls": 26938,
+          "ms": 27.495403
+        }
+      }
+    },
+    {
+      "prediction": "Simple",
+      "packet_bytes": 707,
+      "stages": {
+        "tile": {
+          "calls": 1,
+          "ms": 95.77897
+        },
+        "intra_mode_rdo": {
+          "calls": 4,
+          "ms": 95.245176
+        },
+        "tx_size_type_rdo": {
+          "calls": 144,
+          "ms": 88.765683
+        },
+        "tx_type_rdo": {
+          "calls": 432,
+          "ms": 88.739404
+        },
+        "cfl_rdo": {
+          "calls": 0,
+          "ms": 0.0
+        },
+        "distortion": {
+          "calls": 2016,
+          "ms": 1.175919
+        },
+        "encode_tx_block": {
+          "calls": 21520,
+          "ms": 91.716233
+        },
+        "loop_filter_queue": {
+          "calls": 1,
+          "ms": 0.297156
+        },
+        "prediction": {
+          "calls": 21520,
+          "ms": 3.999726
+        },
+        "forward_transform": {
+          "calls": 21520,
+          "ms": 12.911862
+        },
+        "quantization": {
+          "calls": 21520,
+          "ms": 8.503764
+        },
+        "coefficient_entropy": {
+          "calls": 21520,
+          "ms": 35.813833
+        },
+        "dequantization": {
+          "calls": 21520,
+          "ms": 1.137409
+        },
+        "inverse_transform": {
+          "calls": 21520,
+          "ms": 23.284249
+        }
+      }
+    },
+    {
+      "prediction": "Complex-KFs",
+      "packet_bytes": 661,
+      "stages": {
+        "tile": {
+          "calls": 1,
+          "ms": 154.773214
+        },
+        "intra_mode_rdo": {
+          "calls": 4,
+          "ms": 154.257688
+        },
+        "tx_size_type_rdo": {
+          "calls": 228,
+          "ms": 144.557659
+        },
+        "tx_type_rdo": {
+          "calls": 684,
+          "ms": 144.515609
+        },
+        "cfl_rdo": {
+          "calls": 0,
+          "ms": 0.0
+        },
+        "distortion": {
+          "calls": 3192,
+          "ms": 1.87605
+        },
+        "encode_tx_block": {
+          "calls": 34036,
+          "ms": 148.696534
+        },
+        "loop_filter_queue": {
+          "calls": 1,
+          "ms": 0.276927
+        },
+        "prediction": {
+          "calls": 34036,
+          "ms": 4.773762
+        },
+        "forward_transform": {
+          "calls": 34036,
+          "ms": 21.043635
+        },
+        "quantization": {
+          "calls": 34036,
+          "ms": 13.811883
+        },
+        "coefficient_entropy": {
+          "calls": 34036,
+          "ms": 61.278666
+        },
+        "dequantization": {
+          "calls": 34036,
+          "ms": 1.750153
+        },
+        "inverse_transform": {
+          "calls": 34036,
+          "ms": 36.828922
+        }
+      }
+    },
+    {
+      "prediction": "Simple",
+      "packet_bytes": 1149,
+      "stages": {
+        "tile": {
+          "calls": 1,
+          "ms": 74.475126
+        },
+        "intra_mode_rdo": {
+          "calls": 4,
+          "ms": 72.93759
+        },
+        "tx_size_type_rdo": {
+          "calls": 111,
+          "ms": 63.226685
+        },
+        "tx_type_rdo": {
+          "calls": 333,
+          "ms": 63.20796
+        },
+        "cfl_rdo": {
+          "calls": 4,
+          "ms": 0.054272
+        },
+        "distortion": {
+          "calls": 1378,
+          "ms": 0.873071
+        },
+        "encode_tx_block": {
+          "calls": 16585,
+          "ms": 70.896156
+        },
+        "loop_filter_queue": {
+          "calls": 1,
+          "ms": 0.707249
+        },
+        "prediction": {
+          "calls": 16585,
+          "ms": 4.808928
+        },
+        "forward_transform": {
+          "calls": 16585,
+          "ms": 9.465162
+        },
+        "quantization": {
+          "calls": 16585,
+          "ms": 6.680543
+        },
+        "coefficient_entropy": {
+          "calls": 16585,
+          "ms": 27.774965
+        },
+        "dequantization": {
+          "calls": 16585,
+          "ms": 0.875414
+        },
+        "inverse_transform": {
+          "calls": 16585,
+          "ms": 16.863254
+        }
+      }
+    },
+    {
+      "prediction": "Complex-KFs",
+      "packet_bytes": 1129,
+      "stages": {
+        "tile": {
+          "calls": 1,
+          "ms": 121.905077
+        },
+        "intra_mode_rdo": {
+          "calls": 4,
+          "ms": 120.477641
+        },
+        "tx_size_type_rdo": {
+          "calls": 174,
+          "ms": 102.995735
+        },
+        "tx_type_rdo": {
+          "calls": 522,
+          "ms": 102.964893
+        },
+        "cfl_rdo": {
+          "calls": 4,
+          "ms": 0.056733
+        },
+        "distortion": {
+          "calls": 2308,
+          "ms": 1.445713
+        },
+        "encode_tx_block": {
+          "calls": 26962,
+          "ms": 116.398885
+        },
+        "loop_filter_queue": {
+          "calls": 1,
+          "ms": 0.560874
+        },
+        "prediction": {
+          "calls": 26962,
+          "ms": 5.384992
+        },
+        "forward_transform": {
+          "calls": 26962,
+          "ms": 16.097597
+        },
+        "quantization": {
+          "calls": 26962,
+          "ms": 11.882892
+        },
+        "coefficient_entropy": {
+          "calls": 26962,
+          "ms": 46.074436
+        },
+        "dequantization": {
+          "calls": 26962,
+          "ms": 1.476328
+        },
+        "inverse_transform": {
+          "calls": 26938,
+          "ms": 27.865082
+        }
+      }
+    },
+    {
+      "prediction": "Simple",
+      "packet_bytes": 707,
+      "stages": {
+        "tile": {
+          "calls": 1,
+          "ms": 94.730682
+        },
+        "intra_mode_rdo": {
+          "calls": 4,
+          "ms": 94.186351
+        },
+        "tx_size_type_rdo": {
+          "calls": 144,
+          "ms": 87.869962
+        },
+        "tx_type_rdo": {
+          "calls": 432,
+          "ms": 87.844968
+        },
+        "cfl_rdo": {
+          "calls": 0,
+          "ms": 0.0
+        },
+        "distortion": {
+          "calls": 2016,
+          "ms": 1.27011
+        },
+        "encode_tx_block": {
+          "calls": 21520,
+          "ms": 90.457625
+        },
+        "loop_filter_queue": {
+          "calls": 1,
+          "ms": 0.313011
+        },
+        "prediction": {
+          "calls": 21520,
+          "ms": 4.092543
+        },
+        "forward_transform": {
+          "calls": 21520,
+          "ms": 12.902798
+        },
+        "quantization": {
+          "calls": 21520,
+          "ms": 8.523762
+        },
+        "coefficient_entropy": {
+          "calls": 21520,
+          "ms": 34.847559
+        },
+        "dequantization": {
+          "calls": 21520,
+          "ms": 1.204427
+        },
+        "inverse_transform": {
+          "calls": 21520,
+          "ms": 23.21891
+        }
+      }
+    },
+    {
+      "prediction": "Complex-KFs",
+      "packet_bytes": 661,
+      "stages": {
+        "tile": {
+          "calls": 1,
+          "ms": 151.818424
+        },
+        "intra_mode_rdo": {
+          "calls": 4,
+          "ms": 151.308582
+        },
+        "tx_size_type_rdo": {
+          "calls": 228,
+          "ms": 141.601772
+        },
+        "tx_type_rdo": {
+          "calls": 684,
+          "ms": 141.561649
+        },
+        "cfl_rdo": {
+          "calls": 0,
+          "ms": 0.0
+        },
+        "distortion": {
+          "calls": 3192,
+          "ms": 1.869353
+        },
+        "encode_tx_block": {
+          "calls": 34036,
+          "ms": 145.672635
+        },
+        "loop_filter_queue": {
+          "calls": 1,
+          "ms": 0.279812
+        },
+        "prediction": {
+          "calls": 34036,
+          "ms": 4.695565
+        },
+        "forward_transform": {
+          "calls": 34036,
+          "ms": 20.507046
+        },
+        "quantization": {
+          "calls": 34036,
+          "ms": 13.77566
+        },
+        "coefficient_entropy": {
+          "calls": 34036,
+          "ms": 59.007652
+        },
+        "dequantization": {
+          "calls": 34036,
+          "ms": 1.789429
+        },
+        "inverse_transform": {
+          "calls": 34036,
+          "ms": 36.741146
+        }
+      }
+    },
+    {
+      "prediction": "Simple",
+      "packet_bytes": 1149,
+      "stages": {
+        "tile": {
+          "calls": 1,
+          "ms": 72.521184
+        },
+        "intra_mode_rdo": {
+          "calls": 4,
+          "ms": 71.109286
+        },
+        "tx_size_type_rdo": {
+          "calls": 111,
+          "ms": 61.531981
+        },
+        "tx_type_rdo": {
+          "calls": 333,
+          "ms": 61.513664
+        },
+        "cfl_rdo": {
+          "calls": 4,
+          "ms": 0.068258
+        },
+        "distortion": {
+          "calls": 1378,
+          "ms": 0.888528
+        },
+        "encode_tx_block": {
+          "calls": 16585,
+          "ms": 69.047941
+        },
+        "loop_filter_queue": {
+          "calls": 1,
+          "ms": 0.556499
+        },
+        "prediction": {
+          "calls": 16585,
+          "ms": 4.767636
+        },
+        "forward_transform": {
+          "calls": 16585,
+          "ms": 9.699653
+        },
+        "quantization": {
+          "calls": 16585,
+          "ms": 6.790836
+        },
+        "coefficient_entropy": {
+          "calls": 16585,
+          "ms": 26.167979
+        },
+        "dequantization": {
+          "calls": 16585,
+          "ms": 0.950967
+        },
+        "inverse_transform": {
+          "calls": 16585,
+          "ms": 16.278961
+        }
+      }
+    },
+    {
+      "prediction": "Complex-KFs",
+      "packet_bytes": 1129,
+      "stages": {
+        "tile": {
+          "calls": 1,
+          "ms": 121.259704
+        },
+        "intra_mode_rdo": {
+          "calls": 4,
+          "ms": 119.750141
+        },
+        "tx_size_type_rdo": {
+          "calls": 174,
+          "ms": 101.27589
+        },
+        "tx_type_rdo": {
+          "calls": 522,
+          "ms": 101.245614
+        },
+        "cfl_rdo": {
+          "calls": 4,
+          "ms": 0.056634
+        },
+        "distortion": {
+          "calls": 2308,
+          "ms": 1.483756
+        },
+        "encode_tx_block": {
+          "calls": 26962,
+          "ms": 116.025107
+        },
+        "loop_filter_queue": {
+          "calls": 1,
+          "ms": 0.557992
+        },
+        "prediction": {
+          "calls": 26962,
+          "ms": 5.242467
+        },
+        "forward_transform": {
+          "calls": 26962,
+          "ms": 16.805028
+        },
+        "quantization": {
+          "calls": 26962,
+          "ms": 11.705599
+        },
+        "coefficient_entropy": {
+          "calls": 26962,
+          "ms": 45.280775
+        },
+        "dequantization": {
+          "calls": 26962,
+          "ms": 1.377399
+        },
+        "inverse_transform": {
+          "calls": 26938,
+          "ms": 28.347694
+        }
+      }
+    },
+    {
+      "prediction": "Simple",
+      "packet_bytes": 707,
+      "stages": {
+        "tile": {
+          "calls": 1,
+          "ms": 96.915085
+        },
+        "intra_mode_rdo": {
+          "calls": 4,
+          "ms": 95.989221
+        },
+        "tx_size_type_rdo": {
+          "calls": 144,
+          "ms": 89.915739
+        },
+        "tx_type_rdo": {
+          "calls": 432,
+          "ms": 89.890129
+        },
+        "cfl_rdo": {
+          "calls": 0,
+          "ms": 0.0
+        },
+        "distortion": {
+          "calls": 2016,
+          "ms": 1.313352
+        },
+        "encode_tx_block": {
+          "calls": 21520,
+          "ms": 92.325376
+        },
+        "loop_filter_queue": {
+          "calls": 1,
+          "ms": 0.68539
+        },
+        "prediction": {
+          "calls": 21520,
+          "ms": 4.098319
+        },
+        "forward_transform": {
+          "calls": 21520,
+          "ms": 13.325168
+        },
+        "quantization": {
+          "calls": 21520,
+          "ms": 8.519419
+        },
+        "coefficient_entropy": {
+          "calls": 21520,
+          "ms": 35.919144
+        },
+        "dequantization": {
+          "calls": 21520,
+          "ms": 1.171688
+        },
+        "inverse_transform": {
+          "calls": 21520,
+          "ms": 23.334749
+        }
+      }
+    },
+    {
+      "prediction": "Complex-KFs",
+      "packet_bytes": 661,
+      "stages": {
+        "tile": {
+          "calls": 1,
+          "ms": 155.913965
+        },
+        "intra_mode_rdo": {
+          "calls": 4,
+          "ms": 155.382202
+        },
+        "tx_size_type_rdo": {
+          "calls": 228,
+          "ms": 145.430458
+        },
+        "tx_type_rdo": {
+          "calls": 684,
+          "ms": 145.375215
+        },
+        "cfl_rdo": {
+          "calls": 0,
+          "ms": 0.0
+        },
+        "distortion": {
+          "calls": 3192,
+          "ms": 2.661673
+        },
+        "encode_tx_block": {
+          "calls": 34036,
+          "ms": 148.945688
+        },
+        "loop_filter_queue": {
+          "calls": 1,
+          "ms": 0.281865
+        },
+        "prediction": {
+          "calls": 34036,
+          "ms": 5.164423
+        },
+        "forward_transform": {
+          "calls": 34036,
+          "ms": 21.087291
+        },
+        "quantization": {
+          "calls": 34036,
+          "ms": 14.325465
+        },
+        "coefficient_entropy": {
+          "calls": 34036,
+          "ms": 60.097844
+        },
+        "dequantization": {
+          "calls": 34036,
+          "ms": 1.865083
+        },
+        "inverse_transform": {
+          "calls": 34036,
+          "ms": 37.249133
+        }
+      }
+    },
+    {
+      "prediction": "Simple",
+      "packet_bytes": 1149,
+      "stages": {
+        "tile": {
+          "calls": 1,
+          "ms": 74.177582
+        },
+        "intra_mode_rdo": {
+          "calls": 4,
+          "ms": 72.68236
+        },
+        "tx_size_type_rdo": {
+          "calls": 111,
+          "ms": 62.755849
+        },
+        "tx_type_rdo": {
+          "calls": 333,
+          "ms": 62.736884
+        },
+        "cfl_rdo": {
+          "calls": 4,
+          "ms": 0.054711
+        },
+        "distortion": {
+          "calls": 1378,
+          "ms": 0.98348
+        },
+        "encode_tx_block": {
+          "calls": 16585,
+          "ms": 70.512445
+        },
+        "loop_filter_queue": {
+          "calls": 1,
+          "ms": 0.582267
+        },
+        "prediction": {
+          "calls": 16585,
+          "ms": 4.745274
+        },
+        "forward_transform": {
+          "calls": 16585,
+          "ms": 9.43122
+        },
+        "quantization": {
+          "calls": 16585,
+          "ms": 6.844507
+        },
+        "coefficient_entropy": {
+          "calls": 16585,
+          "ms": 27.376601
+        },
+        "dequantization": {
+          "calls": 16585,
+          "ms": 1.009751
+        },
+        "inverse_transform": {
+          "calls": 16585,
+          "ms": 16.685732
+        }
+      }
+    },
+    {
+      "prediction": "Complex-KFs",
+      "packet_bytes": 1129,
+      "stages": {
+        "tile": {
+          "calls": 1,
+          "ms": 124.411375
+        },
+        "intra_mode_rdo": {
+          "calls": 4,
+          "ms": 122.979776
+        },
+        "tx_size_type_rdo": {
+          "calls": 174,
+          "ms": 104.730452
+        },
+        "tx_type_rdo": {
+          "calls": 522,
+          "ms": 104.69847
+        },
+        "cfl_rdo": {
+          "calls": 4,
+          "ms": 0.055963
+        },
+        "distortion": {
+          "calls": 2308,
+          "ms": 1.498629
+        },
+        "encode_tx_block": {
+          "calls": 26962,
+          "ms": 118.864602
+        },
+        "loop_filter_queue": {
+          "calls": 1,
+          "ms": 0.576699
+        },
+        "prediction": {
+          "calls": 26962,
+          "ms": 5.260856
+        },
+        "forward_transform": {
+          "calls": 26962,
+          "ms": 16.603704
+        },
+        "quantization": {
+          "calls": 26962,
+          "ms": 12.372575
+        },
+        "coefficient_entropy": {
+          "calls": 26962,
+          "ms": 46.694591
+        },
+        "dequantization": {
+          "calls": 26962,
+          "ms": 1.753726
+        },
+        "inverse_transform": {
+          "calls": 26938,
+          "ms": 28.623356
+        }
+      }
+    },
+    {
+      "prediction": "Simple",
+      "packet_bytes": 707,
+      "stages": {
+        "tile": {
+          "calls": 1,
+          "ms": 96.947613
+        },
+        "intra_mode_rdo": {
+          "calls": 4,
+          "ms": 96.399956
+        },
+        "tx_size_type_rdo": {
+          "calls": 144,
+          "ms": 89.535898
+        },
+        "tx_type_rdo": {
+          "calls": 432,
+          "ms": 89.509989
+        },
+        "cfl_rdo": {
+          "calls": 0,
+          "ms": 0.0
+        },
+        "distortion": {
+          "calls": 2016,
+          "ms": 1.173989
+        },
+        "encode_tx_block": {
+          "calls": 21520,
+          "ms": 92.855298
+        },
+        "loop_filter_queue": {
+          "calls": 1,
+          "ms": 0.311318
+        },
+        "prediction": {
+          "calls": 21520,
+          "ms": 4.1753
+        },
+        "forward_transform": {
+          "calls": 21520,
+          "ms": 13.340024
+        },
+        "quantization": {
+          "calls": 21520,
+          "ms": 8.438784
+        },
+        "coefficient_entropy": {
+          "calls": 21520,
+          "ms": 35.808452
+        },
+        "dequantization": {
+          "calls": 21520,
+          "ms": 1.437474
+        },
+        "inverse_transform": {
+          "calls": 21520,
+          "ms": 23.798898
+        }
+      }
+    },
+    {
+      "prediction": "Complex-KFs",
+      "packet_bytes": 661,
+      "stages": {
+        "tile": {
+          "calls": 1,
+          "ms": 155.53039
+        },
+        "intra_mode_rdo": {
+          "calls": 4,
+          "ms": 154.9744
+        },
+        "tx_size_type_rdo": {
+          "calls": 228,
+          "ms": 145.131147
+        },
+        "tx_type_rdo": {
+          "calls": 684,
+          "ms": 145.089809
+        },
+        "cfl_rdo": {
+          "calls": 0,
+          "ms": 0.0
+        },
+        "distortion": {
+          "calls": 3192,
+          "ms": 1.954636
+        },
+        "encode_tx_block": {
+          "calls": 34036,
+          "ms": 149.138115
+        },
+        "loop_filter_queue": {
+          "calls": 1,
+          "ms": 0.303076
+        },
+        "prediction": {
+          "calls": 34036,
+          "ms": 4.713903
+        },
+        "forward_transform": {
+          "calls": 34036,
+          "ms": 21.310996
+        },
+        "quantization": {
+          "calls": 34036,
+          "ms": 14.249456
+        },
+        "coefficient_entropy": {
+          "calls": 34036,
+          "ms": 60.172049
+        },
+        "dequantization": {
+          "calls": 34036,
+          "ms": 1.800302
+        },
+        "inverse_transform": {
+          "calls": 34036,
+          "ms": 37.643506
+        }
+      }
+    },
+    {
+      "prediction": "Simple",
+      "packet_bytes": 1149,
+      "stages": {
+        "tile": {
+          "calls": 1,
+          "ms": 75.393593
+        },
+        "intra_mode_rdo": {
+          "calls": 4,
+          "ms": 73.89764
+        },
+        "tx_size_type_rdo": {
+          "calls": 111,
+          "ms": 63.881331
+        },
+        "tx_type_rdo": {
+          "calls": 333,
+          "ms": 63.861536
+        },
+        "cfl_rdo": {
+          "calls": 4,
+          "ms": 0.068482
+        },
+        "distortion": {
+          "calls": 1378,
+          "ms": 0.878775
+        },
+        "encode_tx_block": {
+          "calls": 16585,
+          "ms": 71.829946
+        },
+        "loop_filter_queue": {
+          "calls": 1,
+          "ms": 0.569479
+        },
+        "prediction": {
+          "calls": 16585,
+          "ms": 4.842631
+        },
+        "forward_transform": {
+          "calls": 16585,
+          "ms": 9.745156
+        },
+        "quantization": {
+          "calls": 16585,
+          "ms": 7.290504
+        },
+        "coefficient_entropy": {
+          "calls": 16585,
+          "ms": 27.947638
+        },
+        "dequantization": {
+          "calls": 16585,
+          "ms": 0.842121
+        },
+        "inverse_transform": {
+          "calls": 16585,
+          "ms": 16.683211
+        }
+      }
+    },
+    {
+      "prediction": "Complex-KFs",
+      "packet_bytes": 1129,
+      "stages": {
+        "tile": {
+          "calls": 1,
+          "ms": 119.215304
+        },
+        "intra_mode_rdo": {
+          "calls": 4,
+          "ms": 117.601668
+        },
+        "tx_size_type_rdo": {
+          "calls": 174,
+          "ms": 99.920073
+        },
+        "tx_type_rdo": {
+          "calls": 522,
+          "ms": 99.890113
+        },
+        "cfl_rdo": {
+          "calls": 4,
+          "ms": 0.055631
+        },
+        "distortion": {
+          "calls": 2308,
+          "ms": 1.534812
+        },
+        "encode_tx_block": {
+          "calls": 26962,
+          "ms": 113.992783
+        },
+        "loop_filter_queue": {
+          "calls": 1,
+          "ms": 0.575167
+        },
+        "prediction": {
+          "calls": 26962,
+          "ms": 5.340586
+        },
+        "forward_transform": {
+          "calls": 26962,
+          "ms": 16.10615
+        },
+        "quantization": {
+          "calls": 26962,
+          "ms": 11.529004
+        },
+        "coefficient_entropy": {
+          "calls": 26962,
+          "ms": 44.487066
+        },
+        "dequantization": {
+          "calls": 26962,
+          "ms": 1.460778
+        },
+        "inverse_transform": {
+          "calls": 26938,
+          "ms": 27.84208
+        }
+      }
+    },
+    {
+      "prediction": "Simple",
+      "packet_bytes": 707,
+      "stages": {
+        "tile": {
+          "calls": 1,
+          "ms": 96.80346
+        },
+        "intra_mode_rdo": {
+          "calls": 4,
+          "ms": 96.2533
+        },
+        "tx_size_type_rdo": {
+          "calls": 144,
+          "ms": 90.01037
+        },
+        "tx_type_rdo": {
+          "calls": 432,
+          "ms": 89.98476
+        },
+        "cfl_rdo": {
+          "calls": 0,
+          "ms": 0.0
+        },
+        "distortion": {
+          "calls": 2016,
+          "ms": 1.187525
+        },
+        "encode_tx_block": {
+          "calls": 21520,
+          "ms": 92.719989
+        },
+        "loop_filter_queue": {
+          "calls": 1,
+          "ms": 0.29852
+        },
+        "prediction": {
+          "calls": 21520,
+          "ms": 4.206304
+        },
+        "forward_transform": {
+          "calls": 21520,
+          "ms": 13.475577
+        },
+        "quantization": {
+          "calls": 21520,
+          "ms": 8.684316
+        },
+        "coefficient_entropy": {
+          "calls": 21520,
+          "ms": 35.906344
+        },
+        "dequantization": {
+          "calls": 21520,
+          "ms": 1.103932
+        },
+        "inverse_transform": {
+          "calls": 21520,
+          "ms": 23.224906
+        }
+      }
+    },
+    {
+      "prediction": "Complex-KFs",
+      "packet_bytes": 661,
+      "stages": {
+        "tile": {
+          "calls": 1,
+          "ms": 155.023744
+        },
+        "intra_mode_rdo": {
+          "calls": 4,
+          "ms": 154.492071
+        },
+        "tx_size_type_rdo": {
+          "calls": 228,
+          "ms": 144.414014
+        },
+        "tx_type_rdo": {
+          "calls": 684,
+          "ms": 144.372707
+        },
+        "cfl_rdo": {
+          "calls": 0,
+          "ms": 0.0
+        },
+        "distortion": {
+          "calls": 3192,
+          "ms": 1.935199
+        },
+        "encode_tx_block": {
+          "calls": 34036,
+          "ms": 148.673332
+        },
+        "loop_filter_queue": {
+          "calls": 1,
+          "ms": 0.278671
+        },
+        "prediction": {
+          "calls": 34036,
+          "ms": 4.606065
+        },
+        "forward_transform": {
+          "calls": 34036,
+          "ms": 20.90647
+        },
+        "quantization": {
+          "calls": 34036,
+          "ms": 14.346481
+        },
+        "coefficient_entropy": {
+          "calls": 34036,
+          "ms": 59.692679
+        },
+        "dequantization": {
+          "calls": 34036,
+          "ms": 1.874291
+        },
+        "inverse_transform": {
+          "calls": 34036,
+          "ms": 37.756922
+        }
+      }
+    }
+  ],
+  "median_timed_api_stage_ms": {
+    "tile": 446.609938,
+    "intra_mode_rdo": 442.23085000000003,
+    "tx_size_type_rdo": 398.154068,
+    "tx_type_rdo": 398.024622,
+    "cfl_rdo": 0.11100499999999999,
+    "distortion": 5.610734,
+    "encode_tx_block": 426.344112,
+    "loop_filter_queue": 1.860946,
+    "prediction": 18.982028,
+    "forward_transform": 60.685944,
+    "quantization": 41.341319,
+    "coefficient_entropy": 167.704612,
+    "dequantization": 5.365137,
+    "inverse_transform": 105.210537
+  }
+}

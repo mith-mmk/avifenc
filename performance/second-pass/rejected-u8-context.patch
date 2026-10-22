@@ -1,0 +1,32 @@
+--- a/src/encoder.rs
++++ b/src/encoder.rs
+@@ -3 +3 @@
+-    EncoderStatus, MatrixCoefficients, PixelRange, PredictionModesSetting, Rational,
++    EncoderStatus, MatrixCoefficients, Pixel, PixelRange, PredictionModesSetting, Rational,
+@@ -863,0 +864,16 @@
++    if bit_depth == 8 {
++        encode_rav1e_pixels::<u8>(width, height, planes, sampling, &config)
++    } else {
++        encode_rav1e_pixels::<u16>(width, height, planes, sampling, &config)
++    }
++}
++
++// The input range is checked before choosing the storage type. rav1e uses
++// i16 coefficients with u8 pixels and i32 coefficients with u16 pixels.
++fn encode_rav1e_pixels<T: Pixel>(
++    width: usize,
++    height: usize,
++    planes: &[PlaneInput<'_>],
++    sampling: Sampling,
++    config: &Config,
++) -> Result<EncodedFrame, EncoderError> {
+@@ -867 +883 @@
+-            .new_context::<u16>()
++            .new_context::<T>()
+@@ -884 +900,5 @@
+-                destination_row[..plane.width].copy_from_slice(source_row);
++                for (destination, &source) in
++                    destination_row[..plane.width].iter_mut().zip(source_row)
++                {
++                    *destination = T::cast_from(source);
++                }

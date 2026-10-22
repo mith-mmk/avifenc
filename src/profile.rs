@@ -17,6 +17,15 @@ pub(crate) enum Kind {
     SkipCheck,
     Transform,
     CoeffCoding,
+    Rav1eValidation,
+    Rav1eConfig,
+    Rav1eContext,
+    Rav1eFrame,
+    Rav1eCopy,
+    Rav1eSubmit,
+    Rav1ePackets,
+    Rav1eBase,
+    Rav1eComplete,
 }
 
 #[cfg(feature = "profile")]
@@ -25,8 +34,8 @@ mod enabled {
     use std::sync::atomic::{AtomicU64, Ordering};
     use std::time::Instant;
 
-    static NANOSECONDS: [AtomicU64; 17] = [const { AtomicU64::new(0) }; 17];
-    static CALLS: [AtomicU64; 17] = [const { AtomicU64::new(0) }; 17];
+    static NANOSECONDS: [AtomicU64; 26] = [const { AtomicU64::new(0) }; 26];
+    static CALLS: [AtomicU64; 26] = [const { AtomicU64::new(0) }; 26];
 
     fn index(kind: Kind) -> usize {
         match kind {
@@ -47,6 +56,15 @@ mod enabled {
             Kind::SkipCheck => 14,
             Kind::Transform => 15,
             Kind::CoeffCoding => 16,
+            Kind::Rav1eValidation => 17,
+            Kind::Rav1eConfig => 18,
+            Kind::Rav1eContext => 19,
+            Kind::Rav1eFrame => 20,
+            Kind::Rav1eCopy => 21,
+            Kind::Rav1eSubmit => 22,
+            Kind::Rav1ePackets => 23,
+            Kind::Rav1eBase => 24,
+            Kind::Rav1eComplete => 25,
         }
     }
 
@@ -93,6 +111,15 @@ mod enabled {
             "skip_check",
             "transform",
             "coeff_coding",
+            "rav1e_validation",
+            "rav1e_config",
+            "rav1e_context",
+            "rav1e_frame",
+            "rav1e_copy_pad",
+            "rav1e_submit_flush",
+            "rav1e_receive_packets",
+            "rav1e_base",
+            "rav1e_complete",
         ];
         eprintln!("avifenc profile");
         for (index, name) in names.into_iter().enumerate() {

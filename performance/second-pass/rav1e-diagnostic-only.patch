@@ -1,0 +1,77 @@
+--- a/src/lib.rs
++++ b/src/lib.rs
+@@ -79,0 +80 @@
++mod perf2_diagnostic;
+--- a/src/encoder.rs
++++ b/src/encoder.rs
+@@ -1432,0 +1433 @@
++  let _perf2 = crate::perf2_diagnostic::Scope::new(6);
+@@ -1473,0 +1475,2 @@
++  {
++  let _perf2_predict = crate::perf2_diagnostic::Scope::new(8);
+@@ -1504,0 +1508 @@
++  }
+@@ -1543,0 +1548,2 @@
++  {
++  let _perf2_forward = crate::perf2_diagnostic::Scope::new(9);
+@@ -1552,0 +1559 @@
++  }
+@@ -1556,3 +1563,5 @@
+-  let eob = ts.qc.quantize(coeffs, qcoeffs, tx_size, tx_type);
+-
+-  let has_coeff = if need_recon_pixel || rdo_type.needs_coeff_rate() {
++  let eob = { let _perf2_quant = crate::perf2_diagnostic::Scope::new(10); ts.qc.quantize(coeffs, qcoeffs, tx_size, tx_type) };
++
++  let has_coeff = {
++  let _perf2_entropy = crate::perf2_diagnostic::Scope::new(11);
++  if need_recon_pixel || rdo_type.needs_coeff_rate() {
+@@ -1585,0 +1595,2 @@
++  }
++
+@@ -1587 +1597,0 @@
+-
+@@ -1588,0 +1599,2 @@
++  {
++  let _perf2_dequant = crate::perf2_diagnostic::Scope::new(12);
+@@ -1599,0 +1612 @@
++  }
+@@ -1605,0 +1619 @@
++    let _perf2_inverse = crate::perf2_diagnostic::Scope::new(13);
+@@ -3382,0 +3397 @@
++  let _perf2 = crate::perf2_diagnostic::Scope::new(7);
+@@ -3472,0 +3488 @@
++  let _perf2 = crate::perf2_diagnostic::Scope::new(0);
+@@ -3818,0 +3835,2 @@
++  eprintln!("dep_frame prediction_modes={} bytes={}", fi.config.speed_settings.prediction.prediction_modes, packet.len());
++  crate::perf2_diagnostic::report();
+--- a/src/rdo.rs
++++ b/src/rdo.rs
+@@ -257,0 +258 @@
++  let _perf2 = crate::perf2_diagnostic::Scope::new(5);
+@@ -730,0 +732 @@
++  let _perf2 = crate::perf2_diagnostic::Scope::new(2);
+@@ -1399,0 +1402 @@
++  let _perf2 = crate::perf2_diagnostic::Scope::new(1);
+@@ -1596,0 +1600 @@
++  let _perf2 = crate::perf2_diagnostic::Scope::new(4);
+@@ -1707,0 +1712 @@
++  let _perf2 = crate::perf2_diagnostic::Scope::new(3);
+--- /dev/null
++++ b/src/perf2_diagnostic.rs
+@@ -0,0 +1,16 @@
++// Diagnostic-only RAII guards. Inclusive times overlap and must not be summed.
++use std::sync::atomic::{AtomicU64, Ordering::Relaxed};
++use std::time::Instant;
++static NS: [AtomicU64; 14] = [const { AtomicU64::new(0) }; 14];
++static CALLS: [AtomicU64; 14] = [const { AtomicU64::new(0) }; 14];
++pub(crate) struct Scope(usize, Instant);
++impl Scope { pub(crate) fn new(index: usize) -> Self { Self(index, Instant::now()) } }
++impl Drop for Scope {
++ fn drop(&mut self) { NS[self.0].fetch_add(self.1.elapsed().as_nanos() as u64, Relaxed); CALLS[self.0].fetch_add(1, Relaxed); }
++}
++pub(crate) fn report() {
++ eprintln!("rav1e dependency stages (inclusive)");
++ for (index, name) in ["tile", "intra_mode_rdo", "tx_size_type_rdo", "tx_type_rdo", "cfl_rdo", "distortion", "encode_tx_block", "loop_filter_queue", "prediction", "forward_transform", "quantization", "coefficient_entropy", "dequantization", "inverse_transform"].iter().enumerate() {
++  eprintln!("dep_stage {} calls={} ms={:.6}", name, CALLS[index].swap(0, Relaxed), NS[index].swap(0, Relaxed) as f64 / 1e6);
++ }
++}

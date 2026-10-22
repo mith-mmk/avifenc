@@ -1,0 +1,23 @@
+{
+  "baseline_revision": "13ef4e46b32569d33fece0b4ed29c994754eff2c",
+  "rustc": "rustc 1.91.0 (f8297e351 2025-10-28)\nbinary: rustc\ncommit-hash: f8297e351a40c1439a467bbbb6879088047f50b3\ncommit-date: 2025-10-28\nhost: x86_64-unknown-linux-gnu\nrelease: 1.91.0\nLLVM version: 21.1.2\n",
+  "build": "cargo build --locked --release --example performance",
+  "features": "default (no multithread encoder feature)",
+  "rustflags": "",
+  "cpu": "AMD EPYC 9V74",
+  "cgroup_cpu_max": "400000 100000",
+  "cgroup_memory_max": "17179869184",
+  "repetitions": "5 fresh processes per binary; alternating AB/BA; 1 warmup +9 timed runs +1 allocation-only run per process; report median of five process medians",
+  "allocation_metric": "Calls to alloc/alloc_zeroed/realloc, cumulative requested bytes (realloc counts full new size). Counts enabled only in allocation-only run, not timed runs. Not live heap or physical memory.",
+  "memory_metric": "Linux /proc/self/status VmHWM, median of five process high-water marks; includes setup, warmup and allocator retention; KiB. Not per-call live heap.",
+  "timing_scope": "API call and output construction; input preparation, checksum and output destruction excluded; counters disabled during timing; std::System wrapper still adds identical disabled flag loads to each allocation in both binaries",
+  "harness_sha256": "b30779ad53f41d66c87235dd7f0ac13fce33968823fae1c09ade1a7a16976545",
+  "production_sources": {
+    "src/encoder.rs": "9289a02e724454706942d42e4ecafc5210719fcbb2963826cc5a6ec6a2943e64"
+  },
+  "binary_sha256": {
+    "before": "62a66779b594892813c59f83dd39bc0e969617fa4e2871335999fb28cf21d435",
+    "after": "244577da8378a1435446544eca0de1b30e9e9dfa1c02cdd0eea26929ef0c7684"
+  },
+  "input": "Procedural RGBA from examples/performance.rs; rows encoded in native 8-bit, alpha pattern enabled. 128x128/256x256 quality100 and128x128quality60, speed10 jobs0; no multithread feature."
+}
